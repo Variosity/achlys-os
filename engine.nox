@@ -1,0 +1,988 @@
+/*
+ * ACHLYS SELF-HOSTED COMPILER (v1.8.4 - THE NEWLINE BYPASS)
+ * "The Mist Compiles Itself"
+ * * FIXED
+ * - Replaced literal '\n' with computed NL variable to force correct line breaks.
+ * - Updated lex_source to handle string escaping properly (\n, \t, \").
+ */
+
+// ============================================================================
+// [SECTION 1] CONSTANTS
+// ============================================================================
+
+communis TOK_EOF : int -> 0^
+communis TOK_INT : int -> 1^
+communis TOK_FLOAT : int -> 2^
+communis TOK_STRING : int -> 3^
+communis TOK_IDENT : int -> 4^
+communis TOK_LET : int -> 5^
+communis TOK_PRINT : int -> 6^
+communis TOK_IF : int -> 7^
+communis TOK_ELSE : int -> 8^
+communis TOK_WHILE : int -> 9^
+communis TOK_OPUS : int -> 10^
+communis TOK_REDDO : int -> 11^
+communis TOK_BREAK : int -> 12^
+communis TOK_CONTINUE : int -> 13^
+communis TOK_IMPORT : int -> 20^
+communis TOK_LPAREN : int -> 21^
+communis TOK_RPAREN : int -> 22^
+communis TOK_LBRACE : int -> 23^
+communis TOK_RBRACE : int -> 24^
+communis TOK_LBRACKET : int -> 25^
+communis TOK_RBRACKET : int -> 26^
+communis TOK_COLON : int -> 27^
+communis TOK_ARROW : int -> 28^
+communis TOK_CARET : int -> 29^
+communis TOK_DOT : int -> 30^
+communis TOK_APPEND : int -> 31^
+communis TOK_EXTRACT : int -> 32^
+communis TOK_AND : int -> 33^
+communis TOK_OR : int -> 34^
+communis TOK_CONST : int -> 35^
+communis TOK_SHARED : int -> 36^
+communis TOK_OP : int -> 37^
+communis TOK_COMMA : int -> 38^
+
+communis EXPR_INT : int -> 100^
+communis EXPR_FLOAT : int -> 101^
+communis EXPR_STRING : int -> 102^
+communis EXPR_VAR : int -> 103^
+communis EXPR_LIST : int -> 104^
+communis EXPR_MAP : int -> 105^
+communis EXPR_BINARY : int -> 106^
+communis EXPR_INDEX : int -> 107^
+communis EXPR_GET : int -> 108^
+communis EXPR_CALL : int -> 109^
+communis EXPR_INPUT : int -> 110^
+communis EXPR_READ : int -> 111^
+communis EXPR_MEASURE : int -> 112^
+
+// Statement Types (Offset by 200)
+communis STMT_LET : int -> 200^
+communis STMT_ASSIGN : int -> 201^
+communis STMT_SET : int -> 202^
+communis STMT_SET_INDEX : int -> 203^
+communis STMT_APPEND : int -> 204^
+communis STMT_EXTRACT : int -> 205^
+communis STMT_PRINT : int -> 206^
+communis STMT_IF : int -> 207^
+communis STMT_WHILE : int -> 208^
+communis STMT_FUNC : int -> 209^
+communis STMT_RETURN : int -> 210^
+communis STMT_IMPORT : int -> 211^
+communis STMT_BREAK : int -> 212^
+communis STMT_CONTINUE : int -> 213^
+communis STMT_EXPR : int -> 214^
+communis STMT_CONST : int -> 215^
+communis STMT_SHARED : int -> 216^
+
+communis VAL_INT : int -> 0^
+communis VAL_FLOAT : int -> 1^
+communis VAL_STRING : int -> 2^
+communis VAL_LIST : int -> 3^
+communis VAL_MAP : int -> 4^
+communis VAL_FUNC : int -> 5^
+communis VAL_VOID : int -> 6^
+
+communis global_tokens : arr -> []^
+communis p_pos : int -> 0^
+communis has_error : int -> 0^
+communis use_huge_lists : int -> 0^
+
+communis str_table : arr -> []^
+communis stack_map : obj -> {}^
+communis stack_offset : int -> 0^
+communis lbl_counter : int -> 0^
+communis asm_main : str -> ""^
+communis asm_funcs : str -> ""^
+communis in_func : int -> 0^
+communis local_vars : arr -> []^
+communis stack_depth : int -> 0^
+
+// ============================================================================
+// [SECTION 2] UTILITY FUNCTIONS
+// ============================================================================
+
+
+opus hex_to_dec(h) {
+    vas len : int -> mensura(h)^
+    vas val : int -> 0^
+    vas i : int -> 0^
+    dum (i < len) {
+        vas c : int -> codex(pars(h, i, 1))^
+        val -> val * 16^
+        // [FIX] Use Bitwise OR (|) to bypass the string-concat pointer heuristic!
+        si (c >= 48) { si (c <= 57) { val -> val | (c - 48)^ } }
+        si (c >= 65) { si (c <= 70) { val -> val | (c - 55)^ } }
+        si (c >= 97) { si (c <= 102) { val -> val | (c - 87)^ } }
+        i -> i + 1^
+    }
+    reddo val^
+}
+
+opus init_constants() {
+    TOK_EOF -> 0^ TOK_INT -> 1^ TOK_FLOAT -> 2^ TOK_STRING -> 3^ TOK_IDENT -> 4^
+    TOK_LET -> 5^ TOK_PRINT -> 6^ TOK_IF -> 7^ TOK_ELSE -> 8^ TOK_WHILE -> 9^
+    TOK_OPUS -> 10^ TOK_REDDO -> 11^ TOK_BREAK -> 12^ TOK_CONTINUE -> 13^
+    TOK_IMPORT -> 20^ TOK_LPAREN -> 21^ TOK_RPAREN -> 22^ TOK_LBRACE -> 23^
+    TOK_RBRACE -> 24^ TOK_LBRACKET -> 25^ TOK_RBRACKET -> 26^ TOK_COLON -> 27^
+    TOK_ARROW -> 28^ TOK_CARET -> 29^ TOK_DOT -> 30^ TOK_APPEND -> 31^
+    TOK_EXTRACT -> 32^ TOK_AND -> 33^ TOK_OR -> 34^ TOK_CONST -> 35^
+    TOK_SHARED -> 36^ TOK_OP -> 37^ TOK_COMMA -> 38^
+
+    EXPR_INT -> 0^ EXPR_FLOAT -> 1^ EXPR_STRING -> 2^ EXPR_VAR -> 3^
+    EXPR_LIST -> 4^ EXPR_MAP -> 5^ EXPR_BINARY -> 6^ EXPR_INDEX -> 7^
+    EXPR_GET -> 8^ EXPR_CALL -> 9^ EXPR_INPUT -> 10^ EXPR_READ -> 11^
+    EXPR_MEASURE -> 12^
+
+    STMT_LET -> 0^ STMT_ASSIGN -> 1^ STMT_SET -> 2^ STMT_SET_INDEX -> 3^
+    STMT_APPEND -> 4^ STMT_EXTRACT -> 5^ STMT_PRINT -> 6^ STMT_IF -> 7^
+    STMT_WHILE -> 8^ STMT_FUNC -> 9^ STMT_RETURN -> 10^ STMT_IMPORT -> 11^
+    STMT_BREAK -> 12^ STMT_CONTINUE -> 13^ STMT_EXPR -> 14^ STMT_CONST -> 15^
+    STMT_SHARED -> 16^
+
+    VAL_INT -> 0^ VAL_FLOAT -> 1^ VAL_STRING -> 2^ VAL_LIST -> 3^
+    VAL_MAP -> 4^ VAL_FUNC -> 5^ VAL_VOID -> 6^
+}
+
+opus is_digit(c) {
+    vas code : int -> codex(c)^
+    // [FIX] Use explicit nesting to avoid precedence bugs
+    si (code >= 48) {
+        si (code <= 57) { reddo 1^ }
+    }
+    reddo 0^
+}
+
+opus is_alpha(c) {
+    vas code : int -> codex(c)^
+    // [FIX] Explicit nesting
+    si (code >= 65) {
+        si (code <= 90) { reddo 1^ }
+    }
+    si (code >= 97) {
+        si (code <= 122) { reddo 1^ }
+    }
+    si (c == "_") { reddo 1^ }
+    reddo 0^
+}
+
+opus is_alnum(c) {
+    vas code : int -> codex(c)^
+    vas res : int -> 0^
+
+    // Check Alpha
+    si (is_alpha(c)) { res -> 1^ }
+
+    // Check Digit
+    si (res == 0) {
+        si (is_digit(c)) { res -> 1^ }
+    }
+
+    // [DEBUG] Print exactly what is happening
+    // scribo("  [DEBUG] is_alnum('" + c + "' / " + int_to_str(code) + ") = " + int_to_str(res))^
+
+    reddo res^
+}
+
+opus is_space(c) {
+    vas code : int -> codex(c)^
+    // [FIX] Individual checks
+    si (code == 32) { reddo 1^ } // Space
+    si (code == 9)  { reddo 1^ } // Tab
+    si (code == 10) { reddo 1^ } // Newline
+    si (code == 13) { reddo 1^ } // CR
+    reddo 0^
+}
+
+opus make_token(type, text) {
+    reddo { "type": type, "text": text }^
+}
+
+
+opus get_str_label(txt) {
+    vas i : int -> 0^
+    dum (i < mensura(str_table)) {
+        vas entry : obj -> str_table[i]^
+        si (entry["txt"] == txt) { reddo entry["lbl"]^ }
+        i -> i + 1^
+    }
+    vas lbl : str -> "str_" + int_to_str(mensura(str_table))^
+    vas new_entry : obj -> { "txt": txt, "lbl": lbl }^
+    str_table << new_entry^
+    reddo lbl^
+}
+
+opus error_report(msg) {
+    //scribo("💀 SYNTAX ERROR: " + msg)^
+    has_error -> 1^
+}
+
+opus nasm_bytes(s) {
+    vas out : str -> ""^
+    vas len : int -> mensura(s)^
+    vas i : int -> 0^
+    dum (i < len) {
+        vas c : str -> pars(s, i, 1)^
+        vas code : int -> codex(c)^
+        out -> out + int_to_str(code) + ", "^
+        i -> i + 1^
+    }
+    reddo out + "0"^
+}
+
+opus is_local(nm) {
+    vas i : int -> 0^
+    dum (i < mensura(local_vars)) {
+        vas v : str -> local_vars[i]^
+        si (v == nm) { reddo 1^ }
+        i -> i + 1^
+    }
+    reddo 0^
+}
+
+opus capere_argumentum(n) {
+    reddo ("engine.nox")^
+}
+
+// ============================================================================
+// [SECTION 3] LEXER
+// ============================================================================
+
+opus lex_source(src) {
+    use_huge_lists -> 1^
+    vas tokens : arr -> []^
+    use_huge_lists -> 0^
+
+    vas len : int -> mensura(src)^
+   // scribo("[DEBUG] Source Length: " + int_to_str(len))^
+    vas i : int -> 0^
+
+    // -- Hoisted Variables --
+    vas c : str -> ""^
+    vas next : str -> ""^
+    vas start : int -> 0^
+    vas txt : str -> ""^
+    vas type : int -> 0^
+    vas loop_c : str -> ""^
+    vas adv : int -> 0^
+
+    // Flags
+    vas run_cmt : int -> 0^
+    vas run_blk : int -> 0^
+    vas run_str : int -> 0^
+    vas run_num : int -> 0^
+    vas run_id : int -> 0^
+    vas esc : str -> ""^
+    vas lcode : int -> 0^
+    vas ok : int -> 0^
+
+    dum (i < len) {
+        c -> pars(src, i, 1)^
+        // [DEBUG] Uncomment to trace infinite loops
+        // scribo("[LEX LOOP] i=" + int_to_str(i) + " c='" + c + "'")^
+
+        // [CHAIN START]
+        si (is_space(c)) {
+            i -> i + 1^
+        }
+        aliter {
+            // [BLOCK 2: COMMENTS / OP]
+            si (c == "/") {
+                next -> pars(src, i+1, 1)^
+                si (next == "/") {
+                    run_cmt -> 1^
+                    dum (run_cmt) {
+                        si (i >= len) { run_cmt -> 0^ }
+                        si (run_cmt) {
+                            loop_c -> pars(src, i, 1)^
+                            si (codex(loop_c) == 10) { run_cmt -> 0^ }
+                            si (run_cmt) { i -> i + 1^ }
+                        }
+                    }
+                } aliter {
+                    si (next == "*") {
+                        i -> i + 2^
+                        run_blk -> 1^
+                        dum (run_blk) {
+                            si (i >= len) { run_blk -> 0^ }
+                            si (run_blk) {
+                                si (pars(src, i, 1) == "*" et pars(src, i+1, 1) == "/") {
+                                    i -> i + 2^
+                                    run_blk -> 0^
+                                }
+                                si (run_blk) { i -> i + 1^ }
+                            }
+                        }
+                    } aliter {
+                        tokens << make_token(TOK_OP, "/")^
+                        i -> i + 1^
+                    }
+                }
+            }
+            aliter {
+                // [BLOCK 3: STRINGS]
+                si (c == "\"") {
+                    i -> i + 1^
+                    txt -> ""^
+                    run_str -> 1^
+                    dum (run_str) {
+                        si (i >= len) { run_str -> 0^ }
+                        si (run_str) {
+                            loop_c -> pars(src, i, 1)^
+                            si (loop_c == "\"") { run_str -> 0^ }
+                            si (run_str) {
+                                si (loop_c == "\\") {
+                                    i -> i + 1^
+                                    esc -> pars(src, i, 1)^
+                                    si (esc == "n") { txt -> txt + signum_ex(10)^ }
+                                    aliter { si (esc == "t") { txt -> txt + signum_ex(9)^ }
+                                    aliter { si (esc == "\"") { txt -> txt + "\""^ }
+                                    aliter { si (esc == "\\") { txt -> txt + "\\"^ }
+                                    aliter { txt -> txt + esc^ } } } }
+                                } aliter {
+                                    txt -> txt + loop_c^
+                                }
+                                i -> i + 1^
+                            }
+                        }
+                    }
+                    tokens << make_token(TOK_STRING, txt)^
+                    i -> i + 1^
+                }
+                aliter {
+                    // [BLOCK 4: NUMBERS]
+                    // [BLOCK 4: NUMBERS & HEX]
+                    si (is_digit(c)) {
+                        start -> i^
+                        vas is_hex : int -> 0^
+
+                        // 1. Check for Hex Prefix (0x or 0X)
+                        si (c == "0") {
+                            vas next_char : str -> pars(src, i+1, 1)^
+                            si (next_char == "x") { is_hex -> 1^ }
+                            si (next_char == "X") { is_hex -> 1^ }
+                        }
+
+                        // 2. Handle Hexadecimal
+                        si (is_hex) {
+                            i -> i + 2^ // Skip the '0x'
+                            start -> i^ // Reset start to the actual hex digits
+                            vas run_hex : int -> 1^
+                            dum (run_hex) {
+                                si (i >= len) { run_hex -> 0^ }
+                                si (run_hex) {
+                                    loop_c -> pars(src, i, 1)^
+                                    // Hex uses 0-9 and A-F, which are all alphanumeric
+                                    si (is_alnum(loop_c) == 0) { run_hex -> 0^ }
+                                    si (run_hex) { i -> i + 1^ }
+                                }
+                            }
+                            vas hex_str : str -> pars(src, start, i - start)^
+                            tokens << make_token(TOK_INT, int_to_str(hex_to_dec(hex_str)))^
+                        }
+                        // 3. Handle Standard Integers / Decimals
+                        aliter {
+                            vas run_num : int -> 1^
+                            dum (run_num) {
+                                si (i >= len) { run_num -> 0^ }
+                                si (run_num) {
+                                    loop_c -> pars(src, i, 1)^
+
+                                    // Safe Logic Flag (Bypasses 'vel' precedence bug)
+                                    vas keep : int -> 0^
+                                    si (is_digit(loop_c)) { keep -> 1^ }
+                                    si (loop_c == ".") { keep -> 1^ }
+
+                                    si (keep == 0) { run_num -> 0^ }
+                                    si (run_num) { i -> i + 1^ }
+                                }
+                            }
+                            txt -> pars(src, start, i - start)^
+                            tokens << make_token(TOK_INT, txt)^
+                        }
+                    }
+                    aliter {
+                        // [BLOCK 5: IDENTIFIERS]
+                        si (is_alpha(c)) {
+                            start -> i^
+                            run_id -> 1^
+                            dum (run_id) {
+                                si (i >= len) { run_id -> 0^ }
+                                si (run_id) {
+                                    loop_c -> pars(src, i, 1)^
+                                    lcode -> codex(loop_c)^
+                                    ok -> 0^
+                                    si (lcode >= 48) { si (lcode <= 57) { ok -> 1^ } }
+                                    si (lcode >= 65) { si (lcode <= 90) { ok -> 1^ } }
+                                    si (lcode >= 97) { si (lcode <= 122) { ok -> 1^ } }
+                                    si (lcode == 95) { ok -> 1^ }
+
+                                    si (ok == 0) { run_id -> 0^ }
+                                    si (run_id) { i -> i + 1^ }
+                                }
+                            }
+                            txt -> pars(src, start, i - start)^
+                            type -> 4^
+                            si (txt == "vas") { type -> 5^ }
+                            si (txt == "idea") { type -> 5^ }
+                            si (txt == "umbra") { type -> 5^ }
+                            si (txt == "scribo") { type -> 6^ }
+                            si (txt == "monstro") { type -> 6^ }
+                            si (txt == "insusurro") { type -> 6^ }
+                            si (txt == "si") { type -> 7^ }
+                            si (txt == "aliter") { type -> 8^ }
+                            si (txt == "dum") { type -> 9^ }
+                            si (txt == "opus") { type -> 10^ }
+                            si (txt == "reddo") { type -> 11^ }
+                            si (txt == "abrumpere") { type -> 12^ }
+                            si (txt == "pergere") { type -> 13^ }
+                            si (txt == "importare") { type -> 20^ }
+                            si (txt == "constans") { type -> 35^ }
+                            si (txt == "communis") { type -> 36^ }
+                            si (txt == "xor") { type -> 37^ txt -> "^"^ }
+                            si (txt == "et") { type -> 33^ }
+                            si (txt == "vel") { type -> 34^ }
+                            si (txt == "verum") { type -> 1^ txt -> "1"^ }
+                            si (txt == "falsum") { type -> 1^ txt -> "0"^ }
+                            tokens << make_token(type, txt)^
+                        }
+                        aliter {
+                            // [BLOCK 6: SYMBOLS]
+                            type -> 0^
+                            adv -> 1^
+                            si (c == "(") { type -> TOK_LPAREN^ }
+                            si (c == ")") { type -> TOK_RPAREN^ }
+                            si (c == "{") { type -> TOK_LBRACE^ }
+                            si (c == "}") { type -> TOK_RBRACE^ }
+                            si (c == "[") { type -> TOK_LBRACKET^ }
+                            si (c == "]") { type -> TOK_RBRACKET^ }
+                            si (c == ":") { type -> TOK_COLON^ }
+                            si (c == "^") { type -> TOK_CARET^ }
+                            si (c == ".") { type -> TOK_DOT^ }
+                            si (c == ",") { type -> TOK_COMMA^ }
+
+                            si (type == 0) {
+                                type -> TOK_OP^
+                                next -> pars(src, i+1, 1)^
+
+                                // [FIX] Nested SI to avoid ET precedence issues
+                                si (c == "-") {
+                                    si (next == ">") { type -> TOK_ARROW^ c -> "->"^ adv -> 2^ }
+                                }
+                                si (c == "=") {
+                                    si (next == "=") { c -> "=="^ adv -> 2^ }
+                                }
+                                si (c == "!") {
+                                    si (next == "=") { c -> "!="^ adv -> 2^ }
+                                }
+                                // [FIX] Added <<< and >>> detection
+                                si (c == "<") {
+                                    vas next2 : str -> pars(src, i+2, 1)^
+                                    si (next == "<") {
+                                        si (next2 == "<") { type -> 37^ c -> "<<<"^ adv -> 3^ }
+                                        aliter { type -> TOK_APPEND^ c -> "<<"^ adv -> 2^ }
+                                    }
+                                    aliter { si (next == "=") { type -> TOK_OP^ c -> "<="^ adv -> 2^ } }
+                                }
+                                si (c == ">") {
+                                    vas next2 : str -> pars(src, i+2, 1)^
+                                    si (next == ">") {
+                                        si (next2 == ">") { type -> 37^ c -> ">>>"^ adv -> 3^ }
+                                        aliter { type -> TOK_EXTRACT^ c -> ">>"^ adv -> 2^ }
+                                    }
+                                    aliter { si (next == "=") { type -> TOK_OP^ c -> ">="^ adv -> 2^ } }
+                                }
+                            }
+
+                            tokens << make_token(type, c)^
+                            i -> i + adv^
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tokens << make_token(TOK_EOF, "EOF")^
+    //scribo("[DEBUG] Lexer finished. Total Tokens: " + int_to_str(mensura(tokens)))^
+    reddo tokens^
+}
+
+// ============================================================================
+// [SECTION 4] PARSER
+// ============================================================================
+
+opus peek() {
+    si (p_pos >= mensura(global_tokens)) { reddo { "type": TOK_EOF, "text": "EOF" }^ }
+    reddo global_tokens[p_pos]^
+}
+
+opus advance() {
+    vas t : obj -> peek()^
+    si (t["type"] != TOK_EOF) { p_pos -> p_pos + 1^ }
+    reddo t^
+}
+
+opus consume(type) {
+    vas t : obj -> peek()^
+    si (t["type"] == type) { advance()^ reddo 1^ }
+    reddo 0^
+}
+
+opus expect(type) {
+    si (consume(type)) { reddo 1^ }
+    vas t : obj -> peek()^
+    error_report("Expected token type " + int_to_str(type) + " but got " + t["text"])^
+    reddo 0^
+}
+
+opus parse_primary() {
+    vas t : obj -> peek()^
+    si (consume(TOK_INT)) { reddo { "type": EXPR_INT, "val": t["text"] }^ }
+    si (consume(TOK_STRING)) { reddo { "type": EXPR_STRING, "val": t["text"] }^ }
+
+    si (consume(TOK_IDENT)) {
+        vas name : str -> t["text"]^
+        si (consume(TOK_LPAREN)) {
+            vas args : arr -> []^
+            si (peek()["type"] != TOK_RPAREN) {
+                args << parse_expr()^
+                dum (consume(TOK_COMMA)) { args << parse_expr()^ }
+            }
+            expect(TOK_RPAREN)^
+            reddo { "type": EXPR_CALL, "name": name, "args": args }^
+        }
+        reddo { "type": EXPR_VAR, "name": name }^
+    }
+
+    si (consume(TOK_LPAREN)) {
+        vas expr : obj -> parse_expr()^
+        expect(TOK_RPAREN)^
+        reddo expr^
+    }
+
+    si (consume(TOK_LBRACKET)) {
+        vas items : arr -> []^
+        si (peek()["type"] != TOK_RBRACKET) {
+            items << parse_expr()^
+            dum (consume(TOK_COMMA)) { items << parse_expr()^ }
+        }
+        expect(TOK_RBRACKET)^
+        reddo { "type": EXPR_LIST, "items": items }^
+    }
+
+    si (consume(TOK_LBRACE)) {
+        vas keys : arr -> []^
+        vas vals : arr -> []^
+        dum (peek()["type"] != TOK_RBRACE) {
+            vas k : obj -> advance()^
+            expect(TOK_COLON)^
+            vas v : obj -> parse_expr()^
+            keys << k["text"]^
+            vals << v^
+            consume(TOK_COMMA)^
+        }
+        expect(TOK_RBRACE)^
+        reddo { "type": EXPR_MAP, "keys": keys, "vals": vals }^
+    }
+
+    si (t["type"] == TOK_OP et t["text"] == "-") {
+        advance()^
+        vas right : obj -> parse_primary()^
+        reddo { "type": EXPR_BINARY, "op": "-", "left": { "type": EXPR_INT, "val": "0" }, "right": right }^
+    }
+
+    si (t["type"] == TOK_OP et t["text"] == "!") {
+        advance()^
+        vas right : obj -> parse_primary()^
+        reddo { "type": EXPR_BINARY, "op": "==", "left": right, "right": { "type": EXPR_INT, "val": "0" } }^
+    }
+
+    si (t["type"] != TOK_EOF) { advance()^ }
+    error_report("Unexpected token: " + t["text"])^
+    reddo { "type": EXPR_INT, "val": "0" }^
+}
+
+opus parse_postfix() {
+    vas expr : obj -> parse_primary()^
+
+    // [FIX] Use a manual flag instead of 'dum(1)' + 'abrumpere'
+    // 'abrumpere' fails inside nested 'aliter' blocks
+    vas running : int -> 1^
+
+    dum (running) {
+        si (consume(TOK_LBRACKET)) {
+            vas idx : obj -> parse_expr()^
+            expect(TOK_RBRACKET)^
+            expr -> { "type": EXPR_INDEX, "obj": expr, "idx": idx }^
+        } aliter {
+            si (consume(TOK_DOT)) {
+                vas t : obj -> advance()^
+                expr -> { "type": EXPR_GET, "obj": expr, "name": t["text"] }^
+            } aliter {
+                // Stop the loop manually
+                running -> 0^
+            }
+        }
+    }
+    reddo expr^
+}
+
+opus parse_term() {
+    vas left : obj -> parse_postfix()^
+    vas t : obj -> peek()^
+    vas running : int -> 1^
+    dum (running) {
+        vas is_op : int -> 0^
+        si (t["type"] == TOK_OP) {
+            vas op : str -> t["text"]^
+            si (op == "*") { is_op -> 1^ }
+            si (op == "/") { is_op -> 1^ }
+            si (op == "%") { is_op -> 1^ }
+        }
+        si (is_op) {
+            vas op : str -> t["text"]^
+            advance()^
+            vas right : obj -> parse_postfix()^
+            left -> { "type": EXPR_BINARY, "op": op, "left": left, "right": right }^
+            t -> peek()^
+        } aliter { running -> 0^ }
+    }
+    reddo left^
+}
+
+opus parse_math() {
+    vas left : obj -> parse_term()^
+    vas t : obj -> peek()^
+    vas running : int -> 1^
+    dum (running) {
+        vas is_op : int -> 0^
+        si (t["type"] == TOK_OP) {
+            vas op : str -> t["text"]^
+            si (op == "+") { is_op -> 1^ }
+            si (op == "-") { is_op -> 1^ }
+        }
+        si (is_op) {
+            vas op : str -> t["text"]^
+            advance()^
+            vas right : obj -> parse_term()^
+            left -> { "type": EXPR_BINARY, "op": op, "left": left, "right": right }^
+            t -> peek()^
+        } aliter { running -> 0^ }
+    }
+    reddo left^
+}
+
+opus parse_bitwise() {
+    vas left : obj -> parse_math()^
+    vas t : obj -> peek()^
+    vas running : int -> 1^
+    dum (running) {
+        vas is_op : int -> 0^
+        vas op : str -> t["text"]^
+        si (t["type"] == TOK_OP) {
+            si (op == "^") { is_op -> 1^ }
+            si (op == "&") { is_op -> 1^ }
+            si (op == "|") { is_op -> 1^ }
+            si (op == "<<<") { is_op -> 1^ }
+            si (op == ">>>") { is_op -> 1^ }
+        }
+        si (t["type"] == TOK_IDENT) {
+            si (op == "xor") { is_op -> 1^ op -> "^"^ }
+        }
+        si (is_op) {
+            advance()^
+            vas right : obj -> parse_math()^
+            left -> { "type": EXPR_BINARY, "op": op, "left": left, "right": right }^
+            t -> peek()^
+        } aliter { running -> 0^ }
+    }
+    reddo left^
+}
+
+opus parse_cmp() {
+    vas left : obj -> parse_bitwise()^
+    vas t : obj -> peek()^
+    vas running : int -> 1^
+    dum (running) {
+        vas is_op : int -> 0^
+        si (t["type"] == TOK_OP) {
+            vas op : str -> t["text"]^
+            si (op == "==") { is_op -> 1^ }
+            si (op == "!=") { is_op -> 1^ }
+            si (op == "<") { is_op -> 1^ }
+            si (op == ">") { is_op -> 1^ }
+            si (op == "<=") { is_op -> 1^ }
+            si (op == ">=") { is_op -> 1^ }
+        }
+        si (is_op) {
+            vas op : str -> t["text"]^
+            advance()^
+            vas right : obj -> parse_bitwise()^
+            left -> { "type": EXPR_BINARY, "op": op, "left": left, "right": right }^
+            t -> peek()^
+        } aliter { running -> 0^ }
+    }
+    reddo left^
+}
+
+opus parse_expr() {
+    vas left : obj -> parse_cmp()^
+    vas t : obj -> peek()^
+    vas running : int -> 1^
+    dum (running) {
+        vas is_op : int -> 0^
+        si (t["type"] == TOK_AND vel t["type"] == TOK_OR) { is_op -> 1^ }
+        si (is_op) {
+            vas op : str -> "et"^
+            si (t["type"] == TOK_OR) { op -> "vel"^ }
+            advance()^
+            vas right : obj -> parse_cmp()^
+            left -> { "type": EXPR_BINARY, "op": op, "left": left, "right": right }^
+            t -> peek()^
+        } aliter { running -> 0^ }
+    }
+    reddo left^
+}
+
+opus parse_stmt() {
+    //scribo("[DEBUG] Parsing stmt...")^
+    vas t : obj -> peek()^
+
+    vas stmt_type : int -> -1^
+
+    si (t["type"] == TOK_LET) { stmt_type -> STMT_LET^ consume(TOK_LET)^ }
+    aliter { si (t["type"] == TOK_SHARED) { stmt_type -> STMT_SHARED^ consume(TOK_SHARED)^ }
+    aliter { si (t["type"] == TOK_CONST) { stmt_type -> STMT_CONST^ consume(TOK_CONST)^ } } }
+
+    si (stmt_type != -1) {
+        vas name : obj -> advance()^
+        expect(TOK_COLON)^
+        advance()^
+        expect(TOK_ARROW)^
+        vas val : obj -> parse_expr()^
+        expect(TOK_CARET)^
+        reddo { "type": stmt_type, "name": name["text"], "val": val }^
+    }
+
+    si (consume(TOK_PRINT)) {
+        expect(TOK_LPAREN)^
+        vas val : obj -> parse_expr()^
+        expect(TOK_RPAREN)^
+        expect(TOK_CARET)^
+        reddo { "type": STMT_PRINT, "val": val }^
+    }
+
+    si (consume(TOK_IF)) {
+        expect(TOK_LPAREN)^
+        vas cond : obj -> parse_expr()^
+        expect(TOK_RPAREN)^
+        expect(TOK_LBRACE)^
+        vas body : arr -> []^
+        dum (peek()["type"] != TOK_RBRACE) {
+            si (peek()["type"] == TOK_CARET) { advance()^ pergere^ }
+            body << parse_stmt()^
+        }
+        expect(TOK_RBRACE)^
+        vas else_body : arr -> []^
+        si (consume(TOK_ELSE)) {
+            // [NEW] Recursive 'aliter si' check
+            si (peek()["type"] == TOK_IF) {
+                else_body << parse_stmt()^
+            } aliter {
+                expect(TOK_LBRACE)^
+                dum (peek()["type"] != TOK_RBRACE) {
+                    si (peek()["type"] == TOK_CARET) { advance()^ pergere^ }
+                    else_body << parse_stmt()^
+                }
+                expect(TOK_RBRACE)^
+            }
+        }
+        reddo { "type": STMT_IF, "cond": cond, "body": body, "else": else_body }^
+    }
+
+    si (consume(TOK_WHILE)) {
+        expect(TOK_LPAREN)^
+        vas cond : obj -> parse_expr()^
+        expect(TOK_RPAREN)^
+        expect(TOK_LBRACE)^
+        vas body : arr -> []^
+        dum (peek()["type"] != TOK_RBRACE) { body << parse_stmt()^ }
+        expect(TOK_RBRACE)^
+        reddo { "type": STMT_WHILE, "cond": cond, "body": body }^
+    }
+
+    si (consume(TOK_OPUS)) {
+        vas name : obj -> advance()^
+        expect(TOK_LPAREN)^
+        vas params : arr -> []^
+        si (peek()["type"] != TOK_RPAREN) {
+            vas p : obj -> advance()^
+            params << p["text"]^
+            dum (consume(TOK_COMMA)) {
+                p -> advance()^
+                params << p["text"]^
+            }
+        }
+        expect(TOK_RPAREN)^
+        expect(TOK_LBRACE)^
+        vas body : arr -> []^
+        dum (peek()["type"] != TOK_RBRACE) { body << parse_stmt()^ }
+        expect(TOK_RBRACE)^
+        reddo { "type": STMT_FUNC, "name": name["text"], "params": params, "body": body }^
+    }
+
+    si (consume(TOK_REDDO)) {
+        vas val : obj -> parse_expr()^
+        expect(TOK_CARET)^
+        reddo { "type": STMT_RETURN, "val": val }^
+    }
+
+    // [FIX] Loops and Multi-file Architecture
+    si (consume(TOK_BREAK)) {
+        expect(TOK_CARET)^
+        reddo { "type": STMT_BREAK }^
+    }
+    si (consume(TOK_CONTINUE)) {
+        expect(TOK_CARET)^
+        reddo { "type": STMT_CONTINUE }^
+    }
+    si (consume(TOK_IMPORT)) {
+        expect(TOK_LPAREN)^
+        vas path : obj -> parse_expr()^
+        expect(TOK_RPAREN)^
+        expect(TOK_CARET)^
+        reddo { "type": STMT_IMPORT, "val": path }^
+    }
+
+    si (t["type"] == TOK_IDENT) {
+        vas next_idx : int -> p_pos + 1^
+        si (next_idx >= mensura(global_tokens)) {
+             error_report("Unexpected EOF")^
+             reddo { "type": -1 }^
+        }
+        vas next : obj -> global_tokens[next_idx]^
+
+        si (next["type"] == TOK_ARROW) {
+            vas name : obj -> advance()^
+            advance()^
+            vas val : obj -> parse_expr()^
+            expect(TOK_CARET)^
+            reddo { "type": STMT_ASSIGN, "name": name["text"], "val": val }^
+        }
+        si (next["type"] == TOK_APPEND) {
+            vas name : obj -> advance()^
+            advance()^
+            vas val : obj -> parse_expr()^
+            expect(TOK_CARET)^
+            reddo { "type": STMT_APPEND, "name": name["text"], "val": val }^
+        }
+        si (next["type"] == TOK_LBRACKET) {
+            vas lhs : obj -> parse_expr()^
+            si (consume(TOK_ARROW)) {
+                vas val : obj -> parse_expr()^
+                expect(TOK_CARET)^
+                si (lhs["type"] == EXPR_INDEX) {
+                    vas arr_nm : obj -> lhs["obj"]^
+                    reddo { "type": STMT_SET_INDEX, "name": arr_nm["name"], "idx": lhs["idx"], "val": val }^
+                }
+            }
+        }
+        si (next["type"] == TOK_LPAREN) {
+            vas expr : obj -> parse_expr()^
+            expect(TOK_CARET)^
+            reddo { "type": STMT_EXPR, "expr": expr }^
+        }
+    }
+
+    si (t["type"] != TOK_EOF) { advance()^ }
+    reddo { "type": -1 }^
+}
+
+// ============================================================================
+// [SECTION 5] THE RING-0 AST EVALUATOR (LIVE EXECUTION)
+// ============================================================================
+
+communis runtime_env : obj -> {}^ 
+communis eval_terminal : int -> -1^
+
+opus eval_expr(node) {
+    si (node["type"] == EXPR_INT) { reddo str_to_int(node["val"])^ }
+    si (node["type"] == EXPR_STRING) { reddo node["val"]^ }
+    si (node["type"] == EXPR_VAR) { reddo runtime_env[node["name"]]^ }
+    
+    si (node["type"] == EXPR_BINARY) {
+        vas op : str -> node["op"]^
+        
+        // [CRITICAL FIX] Added strict type annotations!
+        vas left : int -> eval_expr(node["left"])^
+        vas right : int -> eval_expr(node["right"])^
+        
+        si (op == "+") { reddo left + right^ }
+        si (op == "-") { reddo left - right^ }
+        si (op == "*") { reddo left * right^ }
+        si (op == "/") { reddo left / right^ }
+        si (op == "<") { si (left < right) { reddo 1^ } reddo 0^ }
+        si (op == ">") { si (left > right) { reddo 1^ } reddo 0^ }
+        si (op == "==") { si (left == right) { reddo 1^ } reddo 0^ }
+    }
+    reddo 0^
+}
+
+opus eval_stmt(node) {
+    si (node["type"] == STMT_LET vel node["type"] == STMT_ASSIGN) {
+        runtime_env[node["name"]] -> eval_expr(node["val"])^
+    }
+    aliter si (node["type"] == STMT_PRINT) {
+        // [CRITICAL FIX] Added type annotations and Polymorphic String conversion
+        vas out_val : int -> eval_expr(node["val"])^
+        vas out_str : str -> "" + out_val^ 
+        send_msg(eval_terminal, "IPC:" + out_str + "\n")^
+    }
+    aliter si (node["type"] == STMT_IF) {
+        vas cond : int -> eval_expr(node["cond"])^
+        si (cond != 0) {
+            vas i : int -> 0^
+            dum (i < mensura(node["body"])) { eval_stmt(node["body"][i])^ i -> i + 1^ }
+        } aliter si (mensura(node["else"]) > 0) {
+            vas i : int -> 0^
+            dum (i < mensura(node["else"])) { eval_stmt(node["else"][i])^ i -> i + 1^ }
+        }
+    }
+    aliter si (node["type"] == STMT_WHILE) {
+        dum (eval_expr(node["cond"]) != 0) {
+            vas i : int -> 0^
+            dum (i < mensura(node["body"])) { eval_stmt(node["body"][i])^ i -> i + 1^ }
+        }
+    }
+}
+
+opus execute_achlys_script(term_idx, src) {
+    // 1. Hook the IO to the specific terminal window
+    eval_terminal -> term_idx^
+    
+    // 2. Clear the memory environment
+    runtime_env -> {}^
+    
+    // 3. Lex & Parse
+    global_tokens -> lex_source(src)^
+    p_pos -> 0^
+    
+    vas stmts : arr -> []^
+    vas pt : obj -> peek()^
+    dum (pt["type"] != TOK_EOF) {
+        si (pt["type"] == TOK_CARET) { advance()^ pergere^ }
+        stmts << parse_stmt()^
+        pt -> peek()^
+    }
+    
+    // 4. Live Execution!
+    send_msg(eval_terminal, "IPC:>> ACHLYS NATIVE ENGINE INITIATED...\n")^
+    vas i : int -> 0^
+    dum (i < mensura(stmts)) {
+        eval_stmt(stmts[i])^
+        i -> i + 1^
+    }
+    send_msg(eval_terminal, "IPC:>> EXECUTION COMPLETE.\n")^
+}

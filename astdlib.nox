@@ -1,0 +1,983 @@
+// ---------------------------------------------------------
+// 🛡️ ASTDLIB - Achlys Bare-Metal Standard Library (Ring 0)
+// ---------------------------------------------------------
+
+// --- 1. THE KERNEL HEAP (Memory Manager) ---
+communis kernel_heap : int -> 0x1000000^ 
+
+opus malloc(size) {
+    // [THE GHOST IS DEAD] Force 16-byte physical memory alignment BEFORE allocating!
+    // This prevents the E1000 DMA Controller from silently truncating packet pointers.
+    vas rem : int -> kernel_heap % 16^
+    si (rem > 0) {
+        kernel_heap -> ptr_add(kernel_heap, 16 - rem)^
+    }
+
+    vas allocated_ptr : int -> kernel_heap^
+    kernel_heap -> ptr_add(kernel_heap, size)^ 
+    
+    reddo allocated_ptr^
+}
+opus realloc(ptr, size) {
+    vas new_ptr : int -> malloc(size)^
+    
+    // If this isn't a brand new allocation (ptr > 0), copy the old data over!
+    si (ptr > 0) {
+        vas old_size : int -> size - 8^ // Arrays always grow by exactly 8 bytes
+        vas i : int -> 0^
+        
+        // Native Ring-0 Memcopy
+        dum (i < old_size) {
+            vas b : int -> scrutari(ptr_add(ptr, i))^ // Read 1 byte from old RAM
+            mutare_mem(ptr_add(new_ptr, i), b)^       // Write 1 byte to new RAM
+            i -> i + 1^
+        }
+    }
+    
+    reddo new_ptr^
+}
+
+
+// --- 2. VGA VIDEO DRIVER (Hardware Display) ---
+// The VGA text buffer lives at physical memory address 0xB8000
+
+// --- 2. VESA GRAPHICS COMPOSITOR (The Visual Cortex) ---
+
+communis FB_ADDR : int -> 0^
+communis BACK_BUFFER : int -> 0^ // [NEW] The Invisible Fast-RAM Canvas
+communis FB_PITCH : int -> 0^
+communis FB_WIDTH : int -> 0^
+communis FB_HEIGHT : int -> 0^
+
+opus read_32(addr) {
+    vas b0 : int -> scrutari(addr)^
+    vas b1 : int -> scrutari(ptr_add(addr, 1))^
+    vas b2 : int -> scrutari(ptr_add(addr, 2))^
+    vas b3 : int -> scrutari(ptr_add(addr, 3))^
+    reddo b0 | (b1 <<< 8) | (b2 <<< 16) | (b3 <<< 24)^
+}
+
+opus init_graphics() {
+    FB_ADDR -> read_32(0x5000)^
+    FB_PITCH -> read_32(0x5004)^
+    FB_WIDTH -> read_32(0x5008)^
+    FB_HEIGHT -> read_32(0x500C)^
+    
+    // Allocate the Back Buffer dynamically based on resolution
+    BACK_BUFFER -> malloc(FB_HEIGHT * FB_PITCH)^
+}
+
+opus put_pixel(x, y, r, g, b) {
+    si (x >= 0 et x < FB_WIDTH et y >= 0 et y < FB_HEIGHT) {
+        vas offset : int -> ptr_add(y * FB_PITCH, x * 4)^
+        
+        // [FIX] Draw to the fast BACK_BUFFER instead of the slow graphics card
+        vas addr : int -> ptr_add(BACK_BUFFER, offset)^ 
+        
+        mutare_mem(addr, b)^               
+        mutare_mem(ptr_add(addr, 1), g)^   
+        mutare_mem(ptr_add(addr, 2), r)^   
+    }
+}
+
+// [NEW] Blast the hidden RAM buffer to the physical monitor instantly
+opus swap_buffers() {
+    fast_memcpy(FB_ADDR, BACK_BUFFER, FB_HEIGHT * FB_PITCH)^
+}
+
+
+// --- Absolute Value Helper ---
+opus abs(n) { 
+    si (n < 0) { reddo 0 - n^ } 
+    reddo n^ 
+}
+
+// --- BRESENHAM'S LINE ALGORITHM ---
+// Draws a hardware-accelerated 1-pixel diagonal line between any two points
+opus draw_line(x0, y0, x1, y1, r, g, b) {
+    vas dx : int -> abs(x1 - x0)^
+    vas dy : int -> 0 - abs(y1 - y0)^
+    
+    vas sx : int -> -1^ si (x0 < x1) { sx -> 1^ }
+    vas sy : int -> -1^ si (y0 < y1) { sy -> 1^ }
+    
+    vas err : int -> dx + dy^
+    vas running : int -> 1^
+    
+    dum (running) {
+        // Safety clipping: Only draw if pixel is physically on the monitor
+        si (x0 >= 0 et x0 < FB_WIDTH et y0 >= 0 et y0 < FB_HEIGHT) {
+            put_pixel(x0, y0, r, g, b)^
+        }
+        
+        si (x0 == x1 et y0 == y1) { running -> 0^ }
+        
+        si (running) {
+            vas e2 : int -> 2 * err^
+            si (e2 >= dy) {
+                err -> err + dy^
+                x0 -> x0 + sx^
+            }
+            si (e2 <= dx) {
+                err -> err + dx^
+                y0 -> y0 + sy^
+            }
+        }
+    }
+}
+
+// Draw a solid rectangle
+// HARDWARE ACCELERATED RECTANGLE DRAWING
+opus draw_rect(x, y, w, h, r, g, b) {
+    // Pack RGB bytes into a single 32-bit Little-Endian Hex Color
+    vas color : int -> b | (g <<< 8) | (r <<< 16)^
+    
+    // Safety Canvas Bounds Clipping
+    vas start_x : int -> x^ si (start_x < 0) { start_x -> 0^ }
+    vas start_y : int -> y^ si (start_y < 0) { start_y -> 0^ }
+    vas end_x : int -> x + w^ si (end_x > FB_WIDTH) { end_x -> FB_WIDTH^ }
+    vas end_y : int -> y + h^ si (end_y > FB_HEIGHT) { end_y -> FB_HEIGHT^ }
+    
+    vas draw_w : int -> end_x - start_x^
+    vas draw_h : int -> end_y - start_y^
+    
+    si (draw_w > 0 et draw_h > 0) {
+        vas j : int -> 0^
+        // We only loop the Y-axis now. The X-axis is done in hardware!
+        dum (j < draw_h) {
+            vas current_y : int -> start_y + j^
+            vas offset : int -> ptr_add(current_y * FB_PITCH, start_x * 4)^
+            vas row_addr : int -> ptr_add(BACK_BUFFER, offset)^
+            
+            // BLAST THE ENTIRE ROW IN 1 INSTRUCTION
+            fast_fill32(row_addr, color, draw_w)^
+            
+            j -> j + 1^
+        }
+    }
+}
+
+// Draw a glowing, borderless Node on the Canvas
+opus draw_node(x, y, w, h, r, g, b) {
+    // Fill inner background (Dark Void)
+    draw_rect(x, y, w, h, 15, 15, 18)^
+    
+    // Draw outer glowing neon borders
+    vas t : int -> 2^ // Thickness
+    draw_rect(x, y, w, t, r, g, b)^ // Top
+    draw_rect(x, y + h - t, w, t, r, g, b)^ // Bottom
+    draw_rect(x, y, t, h, r, g, b)^ // Left
+    draw_rect(x + w - t, y, t, h, r, g, b)^ // Right
+}
+
+// Render the Infinite Canvas Background
+opus draw_canvas_gradient() {
+    vas y : int -> 0^
+    dum (y < FB_HEIGHT) {
+        vas x : int -> 0^
+        vas b_val : int -> (y * 255) / FB_HEIGHT^
+        dum (x < FB_WIDTH) {
+            vas r_val : int -> (x * 255) / FB_WIDTH^
+            // A deep, cyberpunk purple/blue gradient
+            put_pixel(x, y, r_val / 3, 5, b_val / 2)^
+            x -> x + 1^
+        }
+        y -> y + 1^
+    }
+}
+
+// --- 3. HARDWARE KEYBOARD DRIVER (PS/2) ---
+
+opus get_scancode() {
+    // Read the status register (Port 0x64)
+    vas status : int -> port_in(0x64)^
+    
+    // Check if Bit 0 is 1 (Output Buffer Full / Data Ready)
+    vas is_ready : int -> status & 1^
+    
+    si (is_ready) {
+        // Read the actual key scancode from the Data Register (Port 0x60)
+        reddo port_in(0x60)^
+    }
+    
+    // Return 0 if no key was pressed
+    reddo 0^
+}
+
+// --- 4. UTILITIES ---
+opus int_to_str(n) {
+    si (n == 0) { reddo "0"^ }
+    vas out : str -> ""^
+    vas is_neg : int -> 0^
+    si (n < 0) { is_neg -> 1^ n -> 0 - n^ }
+    dum (n > 0) {
+        vas digit : int -> n % 10^
+        vas c : int -> 48 + digit^
+        out -> signum_ex(c) + out^
+        n -> n / 10^
+    }
+    si (is_neg) { out -> "-" + out^ }
+    reddo out^
+}
+
+// --- 5. KEYBOARD MAP & TRANSLATOR ---
+// Maps PS/2 Scancodes (Set 1) to ASCII Strings
+communis kbd_map : arr -> [
+    "", "ESC", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "BACKSPACE",
+    "TAB", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "ENTER",
+    "CTRL", "a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'", "`", "LSHIFT",
+    "\\", "z", "x", "c", "v", "b", "n", "m", ",", ".", "/", "RSHIFT", "*",
+    "ALT", " "
+]^
+
+communis shift_map : arr -> [
+    "", "ESC", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "+", "BACKSPACE",
+    "TAB", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "{", "}", "ENTER",
+    "CTRL", "A", "S", "D", "F", "G", "H", "J", "K", "L", ":", "\"", "~", "LSHIFT",
+    "|", "Z", "X", "C", "V", "B", "N", "M", "<", ">", "?", "RSHIFT", "*",
+    "ALT", " "
+]^
+
+opus get_char_from_code(code) {
+    si (code >= 0 et code <= 57) {
+        reddo kbd_map[code]^
+    }
+    reddo ""^
+}
+
+// --- 6. VGA HARDWARE BACKSPACE ---
+/*opus update_cursor() {
+    vas pos : int -> (vga_row * 80) + vga_col^
+    // 0x3D4 is the VGA Command Port, 0x3D5 is the Data Port
+    port_out(0x3D4, 15)^
+    port_out(0x3D5, pos & 255)^         // Low byte
+    port_out(0x3D4, 14)^
+    port_out(0x3D5, (pos >>> 8) & 255)^ // High byte
+}
+
+opus delete_char() {
+    si (vga_col > 0) {
+        vga_col -> vga_col - 1^
+        vas cell_offset : int -> (vga_row * 160) + (vga_col * 2)^
+        vas offset : int -> ptr_add(VGA_BUFFER, cell_offset)^
+        mutare_mem(offset, 32)^ 
+        mutare_mem(ptr_add(offset, 1), vga_color)^
+    } aliter {
+        si (vga_row > 0) {
+            vga_row -> vga_row - 1^
+            vga_col -> 79^
+            vas cell_offset : int -> (vga_row * 160) + (vga_col * 2)^
+            vas offset : int -> ptr_add(VGA_BUFFER, cell_offset)^
+            mutare_mem(offset, 32)^
+            mutare_mem(ptr_add(offset, 1), vga_color)^
+        }
+    }
+    update_cursor()^
+}*/
+
+// --- 7. THE TYPOGRAPHIC ENGINE ---
+
+communis FONT : arr -> []^
+
+opus init_font() {
+    vas i : int -> 0^
+    dum (i < 128) { FONT << 0^ i -> i + 1^ } // Fill with blanks
+    
+    // Core Syntax & Symbols
+    FONT[32] -> 0x0000000000000000^ // Space
+    FONT[33] -> 0x1818181800180000^ // !
+    FONT[45] -> 0x0000007E00000000^ // -
+    FONT[46] -> 0x0000000000181800^ // .
+    FONT[47] -> 0x0408102040800000^ // /
+    FONT[58] -> 0x0018180000181800^ // :
+    FONT[62] -> 0x4020100810204000^ // >
+    FONT[91] -> 0x3C20202020203C00^ // [
+    FONT[93] -> 0x3C04040404043C00^ // ]
+    FONT[95] -> 0x000000000000FF00^ // _
+    FONT[126] -> 0x000000324C000000^ // ~
+    FONT[34] -> 0x2424100000000000^ // "
+    FONT[35] -> 0x24247E247E242400^ // #
+    FONT[36] -> 0x083E283E0A3E0800^ // $
+    FONT[37] -> 0x6264081026460000^ // %
+    FONT[38] -> 0x3844385448340000^ // &
+    FONT[39] -> 0x1818080000000000^ // '
+    FONT[40] -> 0x0810202020100800^ // (
+    FONT[41] -> 0x2010080808102000^ // )
+    FONT[42] -> 0x0014083E08140000^ // *
+    FONT[43] -> 0x0008083E08080000^ // +
+    FONT[44] -> 0x0000000000181020^ // ,
+    FONT[59] -> 0x0018180018081000^ // ;
+    FONT[60] -> 0x0810204020100800^ // <
+    FONT[61] -> 0x00003E003E000000^ // =
+    FONT[63] -> 0x3C42040810001000^ // ?
+    FONT[64] -> 0x3C425A5A423C0000^ // @
+    FONT[92] -> 0x4020100804020100^ // \
+    FONT[94] -> 0x0814220000000000^ // ^
+    FONT[96] -> 0x1020000000000000^ // `
+    FONT[123]-> 0x0C10102010100C00^ // {
+    FONT[124]-> 0x0808080808080800^ // |
+    FONT[125]-> 0x3008080408083000^ // }
+    
+    // Numbers
+    FONT[48] -> 0x3C42424242423C00^ FONT[49] -> 0x0818280808083E00^
+    FONT[50] -> 0x3C42040810207E00^ FONT[51] -> 0x3C42041804423C00^
+    FONT[52] -> 0x081828487E080800^ FONT[53] -> 0x7E407C0202423C00^
+    FONT[54] -> 0x3C407C4242423C00^ FONT[55] -> 0x7E02040810204000^
+    FONT[56] -> 0x3C42423C42423C00^ FONT[57] -> 0x3C42423E02423C00^
+    
+    // Uppercase
+    FONT[65] -> 0x3844447C44444400^ FONT[66] -> 0x7824243824247800^
+    FONT[67] -> 0x3844404040443800^ FONT[68] -> 0x7824242424247800^
+    FONT[69] -> 0x7C40407840407C00^ FONT[70] -> 0x7C40407840404000^
+    FONT[71] -> 0x3844404C44443800^ FONT[72] -> 0x4444447C44444400^
+    FONT[73] -> 0x3810101010103800^ FONT[74] -> 0x0C04040404443800^
+    FONT[75] -> 0x4448506050484400^ FONT[76] -> 0x4040404040407C00^
+    FONT[77] -> 0x446C545444444400^ FONT[78] -> 0x4464544C44444400^
+    FONT[79] -> 0x3844444444443800^ FONT[80] -> 0x7844447840404000^
+    FONT[81] -> 0x3844444454483400^ FONT[82] -> 0x7844447850484400^
+    FONT[83] -> 0x3844403804443800^ FONT[84] -> 0x7C10101010101000^
+    FONT[85] -> 0x4444444444443800^ FONT[86] -> 0x4444444444281000^
+    FONT[87] -> 0x44444454546C4400^ FONT[88] -> 0x4444281028444400^
+    FONT[89] -> 0x4444281010101000^ FONT[90] -> 0x7C04081020407C00^
+    
+    FONT[97] -> 0x00003C043C443C00^ // a
+    FONT[98] -> 0x40407C4242427C00^ // b
+    FONT[99] -> 0x00003C4040403C00^ // c
+    FONT[100]-> 0x04043E4444443E00^ // d
+    FONT[101]-> 0x00003C447C403C00^ // e
+    FONT[102]-> 0x1824207020202000^ // f
+    FONT[103]-> 0x003E44443E043800^ // g
+    FONT[104]-> 0x40407C4242424200^ // h
+    FONT[105]-> 0x1000301010103800^ // i
+    FONT[106]-> 0x0800180808084830^ // j
+    FONT[107]-> 0x2020242830282400^ // k
+    FONT[108]-> 0x3010101010103800^ // l
+    FONT[109]-> 0x00006C5454545400^ // m
+    FONT[110]-> 0x00007C4242424200^ // n
+    FONT[111]-> 0x00003C4242423C00^ // o
+    FONT[112]-> 0x0000784444784040^ // p
+    FONT[113]-> 0x00003E42423E0202^ // q
+    FONT[114]-> 0x00005C6240404000^ // r
+    FONT[115]-> 0x00003E403C027C00^ // s
+    FONT[116]-> 0x2020702020201800^ // t
+    FONT[117]-> 0x0000424242423E00^ // u
+    FONT[118]-> 0x0000424242241800^ // v
+    FONT[119]-> 0x000042425A5A2400^ // w
+    FONT[120]-> 0x0000422418244200^ // x
+    FONT[121]-> 0x0000422418081060^ // y
+    FONT[122]-> 0x00007E0810207E00^ // z
+}
+
+opus draw_char(x, y, ascii_code, r, g, b) {
+    // Safety check: ensure character exists in our map
+    si (ascii_code >= 0 et ascii_code < 128) {
+        vas font_val : int -> FONT[ascii_code]^
+        vas row : int -> 0^
+        
+        dum (row < 8) {
+            vas col : int -> 0^
+            // Extract the specific 8-bit row from the 64-bit integer
+            vas row_data : int -> (font_val >>> ((7 - row) * 8)) & 255^
+            
+            dum (col < 8) {
+                // Extract the specific 1-bit pixel from the row
+                vas bit : int -> (row_data >>> (7 - col)) & 1^
+                si (bit == 1) { put_pixel(x + col, y + row, r, g, b)^ }
+                col -> col + 1^
+            }
+            row -> row + 1^
+        }
+    }
+}
+
+// --- 8. ZUI CAMERA PHYSICS ---
+communis cam_x : int -> 0^
+communis cam_y : int -> 0^
+communis cam_z : int -> 100^ // 100 = 1.0x Scale
+
+// Translate Virtual World Space to Physical Screen Space
+opus world_to_screen_x(wx) { reddo (((wx - cam_x) * cam_z) / 100) + (FB_WIDTH / 2)^ }
+opus world_to_screen_y(wy) { reddo (((wy - cam_y) * cam_z) / 100) + (FB_HEIGHT / 2)^ }
+opus scale_size(s) { reddo (s * cam_z) / 100^ }
+
+// [NEW] Translate Physical Screen Space back to Virtual World Space (Raycasting)
+opus screen_to_world_x(sx) { reddo (((sx - (FB_WIDTH / 2)) * 100) / cam_z) + cam_x^ }
+opus screen_to_world_y(sy) { reddo (((sy - (FB_HEIGHT / 2)) * 100) / cam_z) + cam_y^ }
+
+opus draw_zui_node(wx, wy, ww, wh, r, g, b) {
+    vas sx : int -> world_to_screen_x(wx)^
+    vas sy : int -> world_to_screen_y(wy)^
+    vas sw : int -> scale_size(ww)^
+    vas sh : int -> scale_size(wh)^
+    si (sx + sw > 0 et sx < FB_WIDTH et sy + sh > 0 et sy < FB_HEIGHT) {
+        draw_node(sx, sy, sw, sh, r, g, b)^
+    }
+}
+// --- 9. THE HARDWARE MOUSE DRIVER ---
+communis mouse_x : int -> 512^
+communis mouse_y : int -> 384^
+communis mouse_l_down : int -> 0^
+communis mouse_r_down : int -> 0^
+
+opus mouse_wait(type) {
+    vas time_out : int -> 100000^
+    dum (time_out > 0) {
+        vas stat : int -> port_in(0x64)^
+        si (type == 0) { si ((stat & 1) == 1) { reddo 1^ } } // Data ready to read
+        si (type == 1) { si ((stat & 2) == 0) { reddo 1^ } } // Port ready to write
+        time_out -> time_out - 1^
+    }
+    reddo 0^
+}
+
+opus mouse_write(data) {
+    mouse_wait(1)^ port_out(0x64, 0xD4)^ // Tell board we are talking to mouse
+    mouse_wait(1)^ port_out(0x60, data)^ // Send data
+}
+
+opus mouse_read() {
+    mouse_wait(0)^ reddo port_in(0x60)^
+}
+
+opus init_mouse() {
+    mouse_wait(1)^ port_out(0x64, 0xA8)^ // Enable Aux Port
+    mouse_wait(1)^ port_out(0x64, 0x20)^ // Get Compaq Status
+    mouse_wait(0)^ vas status : int -> port_in(0x60) | 2^ // Enable IRQ12
+    mouse_wait(1)^ port_out(0x64, 0x60)^ // Set Compaq Status
+    mouse_wait(1)^ port_out(0x60, status)^
+    mouse_write(0xF6)^ mouse_read()^     // Tell mouse to use default settings
+    mouse_write(0xF4)^ mouse_read()^     // Enable packet streaming
+}
+
+// The Custom Achlys Reticle (Not a boring arrow)
+opus draw_reticle() {
+    // A hollow, neon green/cyan crosshair
+    draw_rect(mouse_x - 10, mouse_y - 1, 8, 3, 0, 255, 150)^  // Left Arm
+    draw_rect(mouse_x + 3, mouse_y - 1, 8, 3, 0, 255, 150)^   // Right Arm
+    draw_rect(mouse_x - 1, mouse_y - 10, 3, 8, 0, 255, 150)^  // Top Arm
+    draw_rect(mouse_x - 1, mouse_y + 3, 3, 8, 0, 255, 150)^   // Bottom Arm
+    
+    // Core indicator turns Pink when clicked
+    si (mouse_l_down) { put_pixel(mouse_x, mouse_y, 255, 0, 150)^ }
+    aliter { put_pixel(mouse_x, mouse_y, 0, 255, 255)^ }
+}
+
+
+// --- 10. SPATIAL TYPOGRAPHY (ZUI TEXT) ---
+opus draw_zui_char(wx, wy, size_mult, ascii_code, r, g, b) {
+    vas screen_w : int -> scale_size(8 * size_mult)^
+    
+    // ZUI GREEKING: If text is too small, draw a solid block instead of sub-pixels
+    si (screen_w < 4) {
+        vas sx : int -> world_to_screen_x(wx)^
+        vas sy : int -> world_to_screen_y(wy)^
+        si (sx >= 0 et sx < FB_WIDTH et sy >= 0 et sy < FB_HEIGHT) {
+            draw_rect(sx, sy, screen_w, scale_size(8 * size_mult), r / 2, g / 2, b / 2)^
+        }
+        reddo 0^
+    }
+    
+    si (ascii_code >= 0 et ascii_code < 128) {
+        vas font_val : int -> FONT[ascii_code]^
+        vas row : int -> 0^
+        dum (row < 8) {
+            vas col : int -> 0^
+            vas row_data : int -> (font_val >>> ((7 - row) * 8)) & 255^
+            dum (col < 8) {
+                vas bit : int -> (row_data >>> (7 - col)) & 1^
+                si (bit == 1) {
+                    vas cell_wx : int -> wx + (col * size_mult)^
+                    vas cell_wy : int -> wy + (row * size_mult)^
+                    vas sx : int -> world_to_screen_x(cell_wx)^
+                    vas sy : int -> world_to_screen_y(cell_wy)^
+                    vas sw : int -> scale_size(size_mult)^
+                    si (sw < 1) { sw -> 1^ } // Minimum 1 physical pixel limit
+                    
+                    si (sx >= 0 et sx < FB_WIDTH et sy >= 0 et sy < FB_HEIGHT) {
+                        draw_rect(sx, sy, sw, sw, r, g, b)^
+                    }
+                }
+                col -> col + 1^
+            }
+            row -> row + 1^
+        }
+    }
+}
+
+opus draw_zui_string_clipped(wx, wy, nw, nh, size_mult, s, r, g, b) {
+    vas i : int -> 0^
+    vas cur_x : int -> wx^
+    vas cur_y : int -> wy^
+    vas len : int -> mensura(s)^
+    
+    vas char_w : int -> 9 * size_mult^
+    vas line_h : int -> 12 * size_mult^
+    
+    dum (i < len) {
+        vas c_str : str -> pars(s, i, 1)^
+        vas ascii : int -> codex(c_str)^
+        
+        // ZUI BOUNDARY: Wrap text to next line if it hits the right edge
+        si (cur_x + char_w > wx + nw - 10) {
+            cur_x -> wx^
+            cur_y -> cur_y + line_h^
+        }
+        
+        // ZUI BOUNDARY: Stop rendering entirely if text hits the bottom edge
+        si (cur_y + line_h > wy + nh - 10) {
+            i -> len^ // Break loop
+        } aliter {
+            si (ascii == 10) {
+                cur_x -> wx^
+                cur_y -> cur_y + line_h^
+            } aliter {
+                draw_zui_char(cur_x, cur_y, size_mult, ascii, r, g, b)^
+                cur_x -> cur_x + char_w^
+            }
+        }
+        i -> i + 1^
+    }
+}
+
+// --- 11. HEADS-UP DISPLAY (RAW SCREEN TEXT) ---
+opus draw_raw_char(sx, sy, size_mult, ascii_code, r, g, b) {
+    si (ascii_code >= 0 et ascii_code < 128) {
+        vas font_val : int -> FONT[ascii_code]^
+        vas row : int -> 0^
+        dum (row < 8) {
+            vas col : int -> 0^
+            vas row_data : int -> (font_val >>> ((7 - row) * 8)) & 255^
+            dum (col < 8) {
+                vas bit : int -> (row_data >>> (7 - col)) & 1^
+                si (bit == 1) {
+                    vas px : int -> sx + (col * size_mult)^
+                    vas py : int -> sy + (row * size_mult)^
+                    draw_rect(px, py, size_mult, size_mult, r, g, b)^
+                }
+                col -> col + 1^
+            }
+            row -> row + 1^
+        }
+    }
+}
+
+opus draw_raw_string(sx, sy, size_mult, s, r, g, b) {
+    vas i : int -> 0^
+    vas cur_x : int -> sx^
+    vas cur_y : int -> sy^
+    vas len : int -> mensura(s)^
+    
+    dum (i < len) {
+        vas c_str : str -> pars(s, i, 1)^
+        vas ascii : int -> codex(c_str)^
+        si (ascii == 10) { cur_x -> sx^ cur_y -> cur_y + (12 * size_mult)^ } 
+        aliter { draw_raw_char(cur_x, cur_y, size_mult, ascii, r, g, b)^ cur_x -> cur_x + (9 * size_mult)^ }
+        i -> i + 1^
+    }
+}
+
+// --- 12. PCI BUS & E1000 GIGABIT DRIVER ---
+opus write_32(addr, val) {
+    // [CRITICAL FIX] Use native volatile 32-bit MMIO to bypass L1 Cache
+    // This forces the CPU to physically push the descriptor to RAM instantly.
+    mem_write_32(addr, val)^
+}
+opus pci_read_dword(bus, slot, func, offset) {
+    vas address : int -> (1 <<< 31) | (bus <<< 16) | (slot <<< 11) | (func <<< 8) | (offset & 0xFC)^
+    port_out_32(0xCF8, address)^
+    reddo port_in_32(0xCFC)^
+}
+
+opus pci_write_dword(bus, slot, func, offset, val) {
+    vas address : int -> (1 <<< 31) | (bus <<< 16) | (slot <<< 11) | (func <<< 8) | (offset & 0xFC)^
+    port_out_32(0xCF8, address)^
+    port_out_32(0xCFC, val)^
+}
+
+opus pci_get_vendor(bus, slot) { reddo pci_read_dword(bus, slot, 0, 0) & 0xFFFF^ }
+opus pci_get_device(bus, slot) { reddo (pci_read_dword(bus, slot, 0, 0) >>> 16) & 0xFFFF^ }
+
+communis E1000_BAR : int -> 0^
+
+opus init_e1000(bus, slot) {
+    vas bar0 : int -> pci_read_dword(bus, slot, 0, 0x10)^
+    E1000_BAR -> bar0 & 0xFFFFFFF0^ 
+    
+    vas cmd1 : int -> pci_read_dword(bus, slot, 0, 0x04)^
+    pci_write_dword(bus, slot, 0, 0x04, cmd1 | 6)^
+    
+    vas ctrl : int -> mem_read_32(E1000_BAR)^
+    mem_write_32(E1000_BAR, ctrl | 67108864)^ 
+    
+    vas delay : int -> 100000^ 
+    dum (delay > 0) { port_in_32(0xCFC)^ delay -> delay - 1^ }
+    
+    vas cmd2 : int -> pci_read_dword(bus, slot, 0, 0x04)^
+    pci_write_dword(bus, slot, 0, 0x04, cmd2 | 6)^
+    
+    // [CRITICAL FIX] Use ptr_add to bypass String Concatenation!
+    mem_write_32(ptr_add(E1000_BAR, 0x00D8), 4294967295)^ 
+    
+    vas ctrl2 : int -> mem_read_32(E1000_BAR)^
+    mem_write_32(E1000_BAR, ctrl2 | 97)^
+
+    vas m_idx : int -> 0^
+    dum (m_idx < 128) {
+        // Safe to use + here because 0x5200 is < 65536
+        mem_write_32(ptr_add(E1000_BAR, 0x5200 + (m_idx * 4)), 0)^
+        m_idx -> m_idx + 1^
+    }
+    
+    mem_write_32(ptr_add(E1000_BAR, 0x0100), 0)^
+    reddo E1000_BAR^
+}
+
+opus get_mac_address() {
+    vas ral : int -> mem_read_32(ptr_add(E1000_BAR, 0x5400))^
+    vas rah : int -> mem_read_32(ptr_add(E1000_BAR, 0x5404))^
+    
+    vas m1 : str -> int_to_str(ral & 255)^
+    vas m2 : str -> int_to_str((ral >>> 8) & 255)^
+    vas m3 : str -> int_to_str((ral >>> 16) & 255)^
+    vas m4 : str -> int_to_str((ral >>> 24) & 255)^
+    vas m5 : str -> int_to_str(rah & 255)^
+    vas m6 : str -> int_to_str((rah >>> 8) & 255)^
+    
+    reddo m1 + ":" + m2 + ":" + m3 + ":" + m4 + ":" + m5 + ":" + m6^
+}
+
+communis E1000_TX_DESC : int -> 0^
+communis E1000_TX_TAIL : int -> 0^
+communis E1000_RX_DESC : int -> 0^
+communis E1000_RX_CUR : int -> 0^
+communis E1000_RX_LEN : int -> 0^
+
+opus init_e1000_tx() {
+    E1000_TX_DESC -> malloc(512)^
+    fast_fill32(E1000_TX_DESC, 0, 128)^ 
+    
+    mem_write_32(ptr_add(E1000_BAR, 0x3800), E1000_TX_DESC)^ 
+    mem_write_32(ptr_add(E1000_BAR, 0x3804), 0)^             
+    mem_write_32(ptr_add(E1000_BAR, 0x3808), 512)^           
+    
+    mem_write_32(ptr_add(E1000_BAR, 0x3810), 0)^             
+    mem_write_32(ptr_add(E1000_BAR, 0x3818), 0)^             
+    E1000_TX_TAIL -> 0^
+    
+    mem_write_32(ptr_add(E1000_BAR, 0x3828), 16842752)^
+    mem_write_32(ptr_add(E1000_BAR, 0x0410), 6299658)^ 
+    mem_write_32(ptr_add(E1000_BAR, 0x0400), 262394)^  
+}
+
+opus init_e1000_rx() {
+    // 1. Allocate 32 RX Descriptors (512 bytes)
+    E1000_RX_DESC -> malloc(512)^ 
+    fast_fill32(E1000_RX_DESC, 0, 128)^
+    
+    // 2. Allocate 32 Packet Buffers (2KB each) and bind them to the Descriptors
+    vas i : int -> 0^
+    dum (i < 32) {
+        vas pkt_buf : int -> malloc(2048)^ 
+        vas desc_addr : int -> ptr_add(E1000_RX_DESC, i * 16)^
+        
+        mem_write_32(desc_addr, pkt_buf)^       // Buffer Physical Address Low
+        mem_write_32(ptr_add(desc_addr, 4), 0)^ // Buffer Physical Address High
+        i -> i + 1^
+    }
+    
+    // 3. Hand the RX Ring to the Motherboard
+    mem_write_32(ptr_add(E1000_BAR, 0x2800), E1000_RX_DESC)^ // RDBAL
+    mem_write_32(ptr_add(E1000_BAR, 0x2804), 0)^             // RDBAH
+    mem_write_32(ptr_add(E1000_BAR, 0x2808), 512)^           // RDLEN
+    
+    // 4. Set Head and Tail (Tail MUST be Size - 1 to tell NIC all 31 buffers are empty and ready)
+    mem_write_32(ptr_add(E1000_BAR, 0x2810), 0)^             // RDH
+    mem_write_32(ptr_add(E1000_BAR, 0x2818), 31)^            // RDT
+    E1000_RX_CUR -> 0^
+    
+    // 5. Fire up the Receiver (RCTL)
+    // Enable(2) | Unicast Promiscuous(8) | Multicast Promiscuous(16) | Broadcast Accept(32768) | Strip Ethernet CRC(67108864) = 67141658
+    mem_write_32(ptr_add(E1000_BAR, 0x0100), 67141658)^
+}
+
+opus e1000_transmit(packet_ptr, length) {
+    vas desc_addr : int -> ptr_add(E1000_TX_DESC, E1000_TX_TAIL * 16)^
+    
+    mem_write_32(desc_addr, packet_ptr)^        
+    mem_write_32(ptr_add(desc_addr, 4), 0)^     
+    
+    vas cmd_len : int -> length | 184549376^
+    mem_write_32(ptr_add(desc_addr, 8), cmd_len)^ 
+    mem_write_32(ptr_add(desc_addr, 12), 0)^    
+    
+    E1000_TX_TAIL -> (E1000_TX_TAIL + 1) % 32^
+    mem_write_32(ptr_add(E1000_BAR, 0x3818), E1000_TX_TAIL)^ 
+    
+    reddo ptr_add(desc_addr, 12)^ 
+}
+
+
+
+// --- 13. NETWORK PROTOCOL HELPERS ---
+
+// Native Memory Copier (Bypasses LLVM Linker traps)
+opus copy_mem(dst, src, len) {
+    vas i : int -> 0^
+    dum (i < len) {
+        mutare_mem(ptr_add(dst, i), scrutari(ptr_add(src, i)))^
+        i -> i + 1^
+    }
+}
+
+// RFC 793 Checksum (The Flawless Bitwise Edition)
+/*opus net_checksum(addr, len) {
+    vas sum : int -> 0^
+    vas i : int -> 0^
+    dum (i < len) {
+        vas b1 : int -> scrutari(ptr_add(addr, i)) & 255^
+        vas b2 : int -> 0^
+        si (i + 1 < len) { b2 -> scrutari(ptr_add(addr, i + 1)) & 255^ }
+        vas word : int -> (b1 <<< 8) | b2^ 
+        sum -> sum + word^
+        i -> i + 2^
+    }
+    dum (sum > 65535) { sum -> (sum & 65535) + (sum >>> 16)^ }
+    reddo (sum xor 65535) & 65535^
+}*/
+
+opus net_checksum(addr, len) {
+    vas sum : int -> 0^
+    vas i : int -> 0^
+    dum (i < len) {
+        vas b1 : int -> scrutari(ptr_add(addr, i)) & 255^
+        vas b2 : int -> 0^
+        si (i + 1 < len) { b2 -> scrutari(ptr_add(addr, i + 1)) & 255^ }
+        sum -> sum + ((b1 <<< 8) | b2)^
+        i -> i + 2^
+    }
+    
+    // [CRITICAL FIX] Unrolled arithmetic fold bypasses the AST loop mutation bug!
+    vas fold1 : int -> (sum & 65535) + (sum >>> 16)^
+    vas fold2 : int -> (fold1 & 65535) + (fold1 >>> 16)^
+    
+    reddo (fold2 xor 65535) & 65535^
+}
+
+opus tcp_checksum(ip_addr, tcp_addr, tcp_len) {
+    vas sum : int -> 0^
+    
+    // 1. Calculate Pseudo-Header (Src IP, Dst IP, Protocol, TCP Length)
+    vas pw1 : int -> ((scrutari(ptr_add(ip_addr, 12)) & 255) <<< 8) | (scrutari(ptr_add(ip_addr, 13)) & 255)^
+    vas pw2 : int -> ((scrutari(ptr_add(ip_addr, 14)) & 255) <<< 8) | (scrutari(ptr_add(ip_addr, 15)) & 255)^
+    vas pw3 : int -> ((scrutari(ptr_add(ip_addr, 16)) & 255) <<< 8) | (scrutari(ptr_add(ip_addr, 17)) & 255)^
+    vas pw4 : int -> ((scrutari(ptr_add(ip_addr, 18)) & 255) <<< 8) | (scrutari(ptr_add(ip_addr, 19)) & 255)^
+    sum -> sum + pw1 + pw2 + pw3 + pw4 + 6 + tcp_len^
+    
+    // 2. Calculate TCP Header + Payload directly from Synced RAM
+    vas i : int -> 0^
+    dum (i < tcp_len) {
+        vas b1 : int -> scrutari(ptr_add(tcp_addr, i)) & 255^
+        vas b2 : int -> 0^
+        si (i + 1 < tcp_len) { b2 -> scrutari(ptr_add(tcp_addr, i + 1)) & 255^ }
+        sum -> sum + ((b1 <<< 8) | b2)^
+        i -> i + 2^
+    }
+    
+    // 3. Fold and Invert
+    dum (sum > 65535) { sum -> (sum & 65535) + (sum >>> 16)^ }
+    reddo (sum xor 65535) & 65535^
+}
+
+opus e1000_poll_rx() {
+    vas desc_addr : int -> ptr_add(E1000_RX_DESC, E1000_RX_CUR * 16)^
+    vas status_ptr : int -> ptr_add(desc_addr, 12)^ 
+    
+    // Read 1 byte safely using bitwise AND
+    vas status : int -> scrutari(status_ptr) & 255^
+    
+    si ((status % 2) == 1) { 
+        vas pkt_ptr : int -> mem_read_32(desc_addr)^ 
+        
+        vas len_low : int -> scrutari(ptr_add(desc_addr, 8)) & 255^
+        vas len_high : int -> scrutari(ptr_add(desc_addr, 9)) & 255^
+        E1000_RX_LEN -> len_low + (len_high * 256)^
+        
+        mutare_mem(status_ptr, 0)^ 
+        mem_write_32(ptr_add(E1000_BAR, 0x2818), E1000_RX_CUR)^
+        E1000_RX_CUR -> (E1000_RX_CUR + 1) % 32^
+        
+        reddo pkt_ptr^
+    }
+    reddo 0^
+}
+
+opus e1000_send_syn(src_port, seq) {
+    vas f : int -> malloc(64)^
+    vas z : int -> 0^ dum (z < 64) { mutare_mem(ptr_add(f, z), 0)^ z -> z + 1^ }
+
+    mutare_mem(ptr_add(f, 0), 82)^ mutare_mem(ptr_add(f, 1), 85)^ mutare_mem(ptr_add(f, 2), 10)^ mutare_mem(ptr_add(f, 3), 0)^ mutare_mem(ptr_add(f, 4), 2)^ mutare_mem(ptr_add(f, 5), 2)^
+    mutare_mem(ptr_add(f, 6), 82)^ mutare_mem(ptr_add(f, 7), 84)^ mutare_mem(ptr_add(f, 8), 0)^ mutare_mem(ptr_add(f, 9), 18)^ mutare_mem(ptr_add(f, 10), 52)^ mutare_mem(ptr_add(f, 11), 86)^
+    mutare_mem(ptr_add(f, 12), 8)^ mutare_mem(ptr_add(f, 13), 0)^
+
+    vas ip : int -> ptr_add(f, 14)^
+    mutare_mem(ptr_add(ip, 0), 69)^ mutare_mem(ptr_add(ip, 1), 0)^
+    mutare_mem(ptr_add(ip, 2), 0)^ mutare_mem(ptr_add(ip, 3), 44)^
+    mutare_mem(ptr_add(ip, 4), 17)^ mutare_mem(ptr_add(ip, 5), 17)^
+    mutare_mem(ptr_add(ip, 6), 64)^ mutare_mem(ptr_add(ip, 7), 0)^
+    mutare_mem(ptr_add(ip, 8), 64)^ mutare_mem(ptr_add(ip, 9), 6)^
+    mutare_mem(ptr_add(ip, 10), 0)^ mutare_mem(ptr_add(ip, 11), 0)^ 
+    mutare_mem(ptr_add(ip, 12), 10)^ mutare_mem(ptr_add(ip, 13), 0)^ mutare_mem(ptr_add(ip, 14), 2)^ mutare_mem(ptr_add(ip, 15), 15)^
+    mutare_mem(ptr_add(ip, 16), 1)^ mutare_mem(ptr_add(ip, 17), 1)^ mutare_mem(ptr_add(ip, 18), 1)^ mutare_mem(ptr_add(ip, 19), 1)^
+
+    vas tcp : int -> ptr_add(f, 34)^
+    mutare_mem(ptr_add(tcp, 0), (src_port >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 1), src_port & 255)^
+    mutare_mem(ptr_add(tcp, 2), 0)^ mutare_mem(ptr_add(tcp, 3), 80)^
+    mutare_mem(ptr_add(tcp, 4), (seq >>> 24) & 255)^ mutare_mem(ptr_add(tcp, 5), (seq >>> 16) & 255)^ mutare_mem(ptr_add(tcp, 6), (seq >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 7), seq & 255)^
+    mutare_mem(ptr_add(tcp, 8), 0)^ mutare_mem(ptr_add(tcp, 9), 0)^ mutare_mem(ptr_add(tcp, 10), 0)^ mutare_mem(ptr_add(tcp, 11), 0)^
+    mutare_mem(ptr_add(tcp, 12), 96)^ mutare_mem(ptr_add(tcp, 13), 2)^ 
+    mutare_mem(ptr_add(tcp, 14), 255)^ mutare_mem(ptr_add(tcp, 15), 255)^
+    mutare_mem(ptr_add(tcp, 16), 0)^ mutare_mem(ptr_add(tcp, 17), 0)^
+    mutare_mem(ptr_add(tcp, 18), 0)^ mutare_mem(ptr_add(tcp, 19), 0)^
+    mutare_mem(ptr_add(tcp, 20), 2)^ mutare_mem(ptr_add(tcp, 21), 4)^ 
+    mutare_mem(ptr_add(tcp, 22), 5)^ mutare_mem(ptr_add(tcp, 23), 180)^
+
+    cpu_fence()^
+    vas ip_csum : int -> net_checksum(ip, 20)^
+    mutare_mem(ptr_add(ip, 10), (ip_csum >>> 8) & 255)^ mutare_mem(ptr_add(ip, 11), ip_csum & 255)^ 
+    
+    vas pseudo : int -> malloc(64)^
+    mutare_mem(ptr_add(pseudo, 0), 10)^ mutare_mem(ptr_add(pseudo, 1), 0)^ mutare_mem(ptr_add(pseudo, 2), 2)^ mutare_mem(ptr_add(pseudo, 3), 15)^
+    mutare_mem(ptr_add(pseudo, 4), 1)^ mutare_mem(ptr_add(pseudo, 5), 1)^ mutare_mem(ptr_add(pseudo, 6), 1)^ mutare_mem(ptr_add(pseudo, 7), 1)^
+    mutare_mem(ptr_add(pseudo, 8), 0)^ mutare_mem(ptr_add(pseudo, 9), 6)^
+    mutare_mem(ptr_add(pseudo, 10), 0)^ mutare_mem(ptr_add(pseudo, 11), 24)^
+    
+    vas c_i : int -> 0^
+    dum (c_i < 24) { mutare_mem(ptr_add(pseudo, 12 + c_i), scrutari(ptr_add(tcp, c_i)))^ c_i -> c_i + 1^ }
+    
+    cpu_fence()^
+    vas tcp_csum : int -> net_checksum(pseudo, 36)^
+    mutare_mem(ptr_add(tcp, 16), (tcp_csum >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 17), tcp_csum & 255)^
+
+    cpu_fence()^
+    e1000_transmit(f, 64)^
+    vas timeout : int -> 100000^ dum (timeout > 0) { si (mem_read_32(ptr_add(E1000_BAR, 0x3810)) == E1000_TX_TAIL) { timeout -> 0^ } timeout -> timeout - 1^ }
+    reddo f^
+}
+
+opus e1000_send_ack(src_port, seq, a1, a2, a3, a4) {
+    vas f : int -> malloc(64)^
+    vas z : int -> 0^ dum (z < 64) { mutare_mem(ptr_add(f, z), 0)^ z -> z + 1^ }
+
+    mutare_mem(ptr_add(f, 0), 82)^ mutare_mem(ptr_add(f, 1), 85)^ mutare_mem(ptr_add(f, 2), 10)^ mutare_mem(ptr_add(f, 3), 0)^ mutare_mem(ptr_add(f, 4), 2)^ mutare_mem(ptr_add(f, 5), 2)^
+    mutare_mem(ptr_add(f, 6), 82)^ mutare_mem(ptr_add(f, 7), 84)^ mutare_mem(ptr_add(f, 8), 0)^ mutare_mem(ptr_add(f, 9), 18)^ mutare_mem(ptr_add(f, 10), 52)^ mutare_mem(ptr_add(f, 11), 86)^
+    mutare_mem(ptr_add(f, 12), 8)^ mutare_mem(ptr_add(f, 13), 0)^
+
+    vas ip : int -> ptr_add(f, 14)^
+    mutare_mem(ptr_add(ip, 0), 69)^ mutare_mem(ptr_add(ip, 1), 0)^
+    mutare_mem(ptr_add(ip, 2), 0)^ mutare_mem(ptr_add(ip, 3), 40)^
+    mutare_mem(ptr_add(ip, 4), 17)^ mutare_mem(ptr_add(ip, 5), 18)^
+    mutare_mem(ptr_add(ip, 6), 64)^ mutare_mem(ptr_add(ip, 7), 0)^
+    mutare_mem(ptr_add(ip, 8), 64)^ mutare_mem(ptr_add(ip, 9), 6)^
+    mutare_mem(ptr_add(ip, 10), 0)^ mutare_mem(ptr_add(ip, 11), 0)^ 
+    mutare_mem(ptr_add(ip, 12), 10)^ mutare_mem(ptr_add(ip, 13), 0)^ mutare_mem(ptr_add(ip, 14), 2)^ mutare_mem(ptr_add(ip, 15), 15)^
+    mutare_mem(ptr_add(ip, 16), 1)^ mutare_mem(ptr_add(ip, 17), 1)^ mutare_mem(ptr_add(ip, 18), 1)^ mutare_mem(ptr_add(ip, 19), 1)^
+
+    vas tcp : int -> ptr_add(f, 34)^
+    mutare_mem(ptr_add(tcp, 0), (src_port >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 1), src_port & 255)^
+    mutare_mem(ptr_add(tcp, 2), 0)^ mutare_mem(ptr_add(tcp, 3), 80)^
+    mutare_mem(ptr_add(tcp, 4), (seq >>> 24) & 255)^ mutare_mem(ptr_add(tcp, 5), (seq >>> 16) & 255)^ mutare_mem(ptr_add(tcp, 6), (seq >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 7), seq & 255)^
+    mutare_mem(ptr_add(tcp, 8), a1)^ mutare_mem(ptr_add(tcp, 9), a2)^ mutare_mem(ptr_add(tcp, 10), a3)^ mutare_mem(ptr_add(tcp, 11), a4)^
+    mutare_mem(ptr_add(tcp, 12), 80)^ mutare_mem(ptr_add(tcp, 13), 16)^ 
+    mutare_mem(ptr_add(tcp, 14), 255)^ mutare_mem(ptr_add(tcp, 15), 255)^
+    mutare_mem(ptr_add(tcp, 16), 0)^ mutare_mem(ptr_add(tcp, 17), 0)^
+    mutare_mem(ptr_add(tcp, 18), 0)^ mutare_mem(ptr_add(tcp, 19), 0)^
+
+    cpu_fence()^
+    vas ip_csum : int -> net_checksum(ip, 20)^
+    mutare_mem(ptr_add(ip, 10), (ip_csum >>> 8) & 255)^ mutare_mem(ptr_add(ip, 11), ip_csum & 255)^ 
+    
+    vas pseudo : int -> malloc(64)^
+    mutare_mem(ptr_add(pseudo, 0), 10)^ mutare_mem(ptr_add(pseudo, 1), 0)^ mutare_mem(ptr_add(pseudo, 2), 2)^ mutare_mem(ptr_add(pseudo, 3), 15)^
+    mutare_mem(ptr_add(pseudo, 4), 1)^ mutare_mem(ptr_add(pseudo, 5), 1)^ mutare_mem(ptr_add(pseudo, 6), 1)^ mutare_mem(ptr_add(pseudo, 7), 1)^
+    mutare_mem(ptr_add(pseudo, 8), 0)^ mutare_mem(ptr_add(pseudo, 9), 6)^
+    mutare_mem(ptr_add(pseudo, 10), 0)^ mutare_mem(ptr_add(pseudo, 11), 20)^
+    
+    vas c_i : int -> 0^
+    dum (c_i < 20) { mutare_mem(ptr_add(pseudo, 12 + c_i), scrutari(ptr_add(tcp, c_i)))^ c_i -> c_i + 1^ }
+    
+    cpu_fence()^
+    vas tcp_csum : int -> net_checksum(pseudo, 32)^
+    mutare_mem(ptr_add(tcp, 16), (tcp_csum >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 17), tcp_csum & 255)^
+
+    cpu_fence()^
+    e1000_transmit(f, 64)^
+    vas timeout : int -> 100000^ dum (timeout > 0) { si (mem_read_32(ptr_add(E1000_BAR, 0x3810)) == E1000_TX_TAIL) { timeout -> 0^ } timeout -> timeout - 1^ }
+}
+
+opus e1000_send_get(src_port, seq, a1, a2, a3, a4) {
+    vas f : int -> malloc(110)^
+    vas z : int -> 0^ dum (z < 110) { mutare_mem(ptr_add(f, z), 0)^ z -> z + 1^ }
+    vas payload_len : int -> 52^
+
+    mutare_mem(ptr_add(f, 0), 82)^ mutare_mem(ptr_add(f, 1), 85)^ mutare_mem(ptr_add(f, 2), 10)^ mutare_mem(ptr_add(f, 3), 0)^ mutare_mem(ptr_add(f, 4), 2)^ mutare_mem(ptr_add(f, 5), 2)^
+    mutare_mem(ptr_add(f, 6), 82)^ mutare_mem(ptr_add(f, 7), 84)^ mutare_mem(ptr_add(f, 8), 0)^ mutare_mem(ptr_add(f, 9), 18)^ mutare_mem(ptr_add(f, 10), 52)^ mutare_mem(ptr_add(f, 11), 86)^
+    mutare_mem(ptr_add(f, 12), 8)^ mutare_mem(ptr_add(f, 13), 0)^
+
+    vas ip : int -> ptr_add(f, 14)^
+    vas tlen : int -> 40 + payload_len^
+    mutare_mem(ptr_add(ip, 0), 69)^ mutare_mem(ptr_add(ip, 1), 0)^
+    mutare_mem(ptr_add(ip, 2), (tlen >>> 8) & 255)^ mutare_mem(ptr_add(ip, 3), tlen & 255)^
+    mutare_mem(ptr_add(ip, 4), 17)^ mutare_mem(ptr_add(ip, 5), 19)^
+    mutare_mem(ptr_add(ip, 6), 64)^ mutare_mem(ptr_add(ip, 7), 0)^
+    mutare_mem(ptr_add(ip, 8), 64)^ mutare_mem(ptr_add(ip, 9), 6)^
+    mutare_mem(ptr_add(ip, 10), 0)^ mutare_mem(ptr_add(ip, 11), 0)^
+    mutare_mem(ptr_add(ip, 12), 10)^ mutare_mem(ptr_add(ip, 13), 0)^ mutare_mem(ptr_add(ip, 14), 2)^ mutare_mem(ptr_add(ip, 15), 15)^
+    mutare_mem(ptr_add(ip, 16), 1)^ mutare_mem(ptr_add(ip, 17), 1)^ mutare_mem(ptr_add(ip, 18), 1)^ mutare_mem(ptr_add(ip, 19), 1)^
+
+    vas tcp : int -> ptr_add(f, 34)^
+    mutare_mem(ptr_add(tcp, 0), (src_port >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 1), src_port & 255)^
+    mutare_mem(ptr_add(tcp, 2), 0)^ mutare_mem(ptr_add(tcp, 3), 80)^
+    mutare_mem(ptr_add(tcp, 4), (seq >>> 24) & 255)^ mutare_mem(ptr_add(tcp, 5), (seq >>> 16) & 255)^ mutare_mem(ptr_add(tcp, 6), (seq >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 7), seq & 255)^
+    mutare_mem(ptr_add(tcp, 8), a1)^ mutare_mem(ptr_add(tcp, 9), a2)^ mutare_mem(ptr_add(tcp, 10), a3)^ mutare_mem(ptr_add(tcp, 11), a4)^
+    mutare_mem(ptr_add(tcp, 12), 80)^ mutare_mem(ptr_add(tcp, 13), 24)^ 
+    mutare_mem(ptr_add(tcp, 14), 255)^ mutare_mem(ptr_add(tcp, 15), 255)^
+    mutare_mem(ptr_add(tcp, 16), 0)^ mutare_mem(ptr_add(tcp, 17), 0)^
+    mutare_mem(ptr_add(tcp, 18), 0)^ mutare_mem(ptr_add(tcp, 19), 0)^
+
+    vas p : int -> ptr_add(f, 54)^
+    mutare_mem(ptr_add(p, 0), 71)^ mutare_mem(ptr_add(p, 1), 69)^ mutare_mem(ptr_add(p, 2), 84)^ mutare_mem(ptr_add(p, 3), 32)^
+    mutare_mem(ptr_add(p, 4), 47)^ mutare_mem(ptr_add(p, 5), 32)^ mutare_mem(ptr_add(p, 6), 72)^ mutare_mem(ptr_add(p, 7), 84)^
+    mutare_mem(ptr_add(p, 8), 84)^ mutare_mem(ptr_add(p, 9), 80)^ mutare_mem(ptr_add(p, 10), 47)^ mutare_mem(ptr_add(p, 11), 49)^
+    mutare_mem(ptr_add(p, 12), 46)^ mutare_mem(ptr_add(p, 13), 49)^ mutare_mem(ptr_add(p, 14), 13)^ mutare_mem(ptr_add(p, 15), 10)^
+    mutare_mem(ptr_add(p, 16), 72)^ mutare_mem(ptr_add(p, 17), 111)^ mutare_mem(ptr_add(p, 18), 115)^ mutare_mem(ptr_add(p, 19), 116)^
+    mutare_mem(ptr_add(p, 20), 58)^ mutare_mem(ptr_add(p, 21), 32)^ mutare_mem(ptr_add(p, 22), 49)^ mutare_mem(ptr_add(p, 23), 46)^
+    mutare_mem(ptr_add(p, 24), 49)^ mutare_mem(ptr_add(p, 25), 46)^ mutare_mem(ptr_add(p, 26), 49)^ mutare_mem(ptr_add(p, 27), 46)^
+    mutare_mem(ptr_add(p, 28), 49)^ mutare_mem(ptr_add(p, 29), 13)^ mutare_mem(ptr_add(p, 30), 10)^ mutare_mem(ptr_add(p, 31), 67)^
+    mutare_mem(ptr_add(p, 32), 111)^ mutare_mem(ptr_add(p, 33), 110)^ mutare_mem(ptr_add(p, 34), 110)^ mutare_mem(ptr_add(p, 35), 101)^
+    mutare_mem(ptr_add(p, 36), 99)^ mutare_mem(ptr_add(p, 37), 116)^ mutare_mem(ptr_add(p, 38), 105)^ mutare_mem(ptr_add(p, 39), 111)^
+    mutare_mem(ptr_add(p, 40), 110)^ mutare_mem(ptr_add(p, 41), 58)^ mutare_mem(ptr_add(p, 42), 32)^ mutare_mem(ptr_add(p, 43), 99)^
+    mutare_mem(ptr_add(p, 44), 108)^ mutare_mem(ptr_add(p, 45), 111)^ mutare_mem(ptr_add(p, 46), 115)^ mutare_mem(ptr_add(p, 47), 101)^
+    mutare_mem(ptr_add(p, 48), 13)^ mutare_mem(ptr_add(p, 49), 10)^ mutare_mem(ptr_add(p, 50), 13)^ mutare_mem(ptr_add(p, 51), 10)^
+
+    cpu_fence()^
+    vas ip_csum : int -> net_checksum(ip, 20)^
+    mutare_mem(ptr_add(ip, 10), (ip_csum >>> 8) & 255)^ mutare_mem(ptr_add(ip, 11), ip_csum & 255)^ 
+    
+    vas pseudo : int -> malloc(128)^
+    mutare_mem(ptr_add(pseudo, 0), 10)^ mutare_mem(ptr_add(pseudo, 1), 0)^ mutare_mem(ptr_add(pseudo, 2), 2)^ mutare_mem(ptr_add(pseudo, 3), 15)^
+    mutare_mem(ptr_add(pseudo, 4), 1)^ mutare_mem(ptr_add(pseudo, 5), 1)^ mutare_mem(ptr_add(pseudo, 6), 1)^ mutare_mem(ptr_add(pseudo, 7), 1)^
+    mutare_mem(ptr_add(pseudo, 8), 0)^ mutare_mem(ptr_add(pseudo, 9), 6)^
+    mutare_mem(ptr_add(pseudo, 10), 0)^ mutare_mem(ptr_add(pseudo, 11), 72)^
+    
+    vas c_i : int -> 0^
+    dum (c_i < 72) { mutare_mem(ptr_add(pseudo, 12 + c_i), scrutari(ptr_add(tcp, c_i)))^ c_i -> c_i + 1^ }
+    
+    cpu_fence()^
+    vas tcp_csum : int -> net_checksum(pseudo, 84)^
+    mutare_mem(ptr_add(tcp, 16), (tcp_csum >>> 8) & 255)^ mutare_mem(ptr_add(tcp, 17), tcp_csum & 255)^
+
+    cpu_fence()^
+    e1000_transmit(f, 14 + tlen)^
+    vas timeout : int -> 100000^ dum (timeout > 0) { si (mem_read_32(ptr_add(E1000_BAR, 0x3810)) == E1000_TX_TAIL) { timeout -> 0^ } timeout -> timeout - 1^ }
+    reddo f^
+}

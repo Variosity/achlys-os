@@ -1,0 +1,1188 @@
+importare("astdlib.nox")^
+importare("engine.nox")^
+
+// ===================================================
+// 1. THE BIMODAL TOPOLOGY
+// ===================================================
+communis actor_x : arr -> []^ communis actor_y : arr -> []^
+communis actor_w : arr -> []^ communis actor_h : arr -> []^
+communis actor_text : arr -> []^ communis actor_cmd : arr -> []^
+communis actor_mailbox : arr -> []^ communis actor_budget : arr -> []^
+communis actor_app : arr -> []^ // State -1 = DEAD (Tombstone)
+communis actor_file_buf : arr -> []^
+communis actor_target : arr -> []^
+communis wire_from : arr -> []^ communis wire_to : arr -> []^
+
+communis grabbed_node : int -> -1^
+communis focused_node : int -> -1^
+communis routing_node : int -> -1^
+communis resizing_node : int -> -1^
+communis omni_text : str -> ""^
+
+communis paradigm : int -> 1^
+communis mouse_has_wheel : int -> 0^
+
+communis tcp_global_seq : int -> 3000^
+
+// ===================================================
+// 2. THE MATHEMATICAL TILING ENGINE (Tombstone-Aware)
+// ===================================================
+opus apply_layout() {
+    // 1. Count only ALIVE nodes
+    vas n : int -> 0^
+    vas c : int -> 0^
+    dum (c < mensura(actor_x)) {
+        si (actor_app[c] != -1) { n -> n + 1^ }
+        c -> c + 1^
+    }
+    si (n == 0) { reddo 0^ }
+
+    vas gap : int -> 15^ vas margin : int -> 20^ vas ob_h : int -> 40^
+    vas work_w : int -> FB_WIDTH - (margin * 2)^
+    vas work_h : int -> FB_HEIGHT - ob_h - (margin * 3)^
+
+    vas cx : int -> FB_WIDTH / 2^
+    vas cy : int -> FB_HEIGHT / 2^
+    vas start_y : int -> margin - cy^
+    vas start_x : int -> margin - cx^
+
+    vas left_count : int -> (n / 2) + (n % 2)^
+    vas right_count : int -> n - left_count^
+    vas col_w : int -> (work_w / 2) - (gap / 2)^
+    si (n == 1) { col_w -> work_w^ } // Override for single node
+
+    vas l_idx : int -> 0^
+    vas r_idx : int -> 0^
+    vas i : int -> 0^
+
+    dum (i < mensura(actor_x)) {
+        // Only Tile ALIVE nodes!
+        si (actor_app[i] != -1) {
+            si (l_idx < left_count) {
+                vas left_h : int -> (work_h - (gap * (left_count - 1))) / left_count^
+                si (n == 1) { left_h -> work_h^ }
+                actor_x[i] -> start_x^
+                actor_y[i] -> start_y + (l_idx * (left_h + gap))^
+                actor_w[i] -> col_w^
+                actor_h[i] -> left_h^
+                l_idx -> l_idx + 1^
+            } aliter {
+                vas right_h : int -> (work_h - (gap * (right_count - 1))) / right_count^
+                actor_x[i] -> start_x + col_w + gap^
+                actor_y[i] -> start_y + (r_idx * (right_h + gap))^
+                actor_w[i] -> col_w^
+                actor_h[i] -> right_h^
+                r_idx -> r_idx + 1^
+            }
+        }
+        i -> i + 1^
+    }
+}
+
+// ===================================================
+// 3. EPHEMERAL PHYSICS (Memory-Safe Static Pool)
+// ===================================================
+communis rand_seed : int -> 848382^
+opus rand() { 
+    // [CRITICAL FIX] Use double-subtraction to bypass the polymorphic pointer trap!
+    rand_seed -> (rand_seed * 1103515245) - (0 - 12345)^
+    
+    vas ret : int -> rand_seed % 2147483647^
+    si (ret < 0) { ret -> 0 - ret^ }
+    reddo ret^ 
+}
+
+communis MAX_PARTS : int -> 150^
+communis part_x : arr -> []^ communis part_y : arr -> []^
+communis part_vx : arr -> []^ communis part_vy : arr -> []^
+communis part_life : arr -> []^
+
+opus init_particles() {
+    vas i : int -> 0^
+    dum (i < MAX_PARTS) {
+        part_x << 0^ part_y << 0^ part_vx << 0^ part_vy << 0^ part_life << 0^
+        i -> i + 1^
+    }
+}
+
+opus spawn_particles(x, y, w, h) {
+    vas safe_w : int -> w^ si (safe_w <= 0) { safe_w -> 1^ } // Anti-INT 0 Armor
+    vas safe_h : int -> h^ si (safe_h <= 0) { safe_h -> 1^ }
+
+    vas c : int -> 0^ vas p : int -> 0^
+    dum (p < MAX_PARTS et c < 40) {
+        si (part_life[p] <= 0) {
+            part_x[p] -> x + (rand() % safe_w)^ part_y[p] -> y + (rand() % safe_h)^
+            part_vx[p] -> (rand() % 20) - 10^ part_vy[p] -> (rand() % 20) - 15^
+            part_life[p] -> 30 + (rand() % 30)^
+            c -> c + 1^
+        }
+        p -> p + 1^
+    }
+}
+
+opus render_particles() {
+    vas i : int -> 0^ vas is_active : int -> 0^
+    dum (i < MAX_PARTS) {
+        si (part_life[i] > 0) {
+            part_x[i] -> part_x[i] + part_vx[i]^ part_y[i] -> part_y[i] + part_vy[i]^
+            part_vy[i] -> part_vy[i] + 1^ part_life[i] -> part_life[i] - 1^
+            vas sx : int -> world_to_screen_x(part_x[i])^
+            vas sy : int -> world_to_screen_y(part_y[i])^
+            vas sw : int -> scale_size(4)^ si (sw < 1) { sw -> 1^ }
+            draw_rect(sx, sy, sw, sw, 0, 255, 255)^
+            is_active -> 1^
+        }
+        i -> i + 1^
+    }
+    reddo is_active^
+}
+
+opus achlys_panic(err) {
+    draw_rect(0, 0, FB_WIDTH, FB_HEIGHT, 200, 0, 0)^
+    draw_rect(0, 350, FB_WIDTH, 68, 255, 255, 255)^
+    vas err_msg : str -> "KERNEL PANIC - INT "^
+    draw_raw_string((FB_WIDTH / 2) - 200, 375, 2, err_msg + int_to_str(err), 255, 0, 0)^
+    swap_buffers()^ dum (verum) {}
+}
+
+
+// ===================================================
+// MICRO-NOX VIRTUAL MACHINE (Embedded AST)
+// ===================================================
+opus str_to_int(s) {
+    vas len : int -> mensura(s)^
+    vas val : int -> 0^
+    vas i : int -> 0^
+    dum (i < len) {
+        vas c : int -> codex(pars(s, i, 1))^
+        si (c >= 48 et c <= 57) { val -> (val * 10) + (c - 48)^ }
+        i -> i + 1^
+    }
+    reddo val^
+}
+
+opus sys_exec(node_idx, code) {
+    // 1. Lex the file into lines
+    vas lines : arr -> []^
+    vas cur : str -> ""^
+    vas i : int -> 0^
+    dum (i < mensura(code)) {
+        vas c : str -> pars(code, i, 1)^
+        si (c == "^" vel codex(c) == 10) { 
+            si (mensura(cur) > 0) { lines << cur^ cur -> ""^ }
+        } aliter { cur -> cur + c^ }
+        i -> i + 1^
+    }
+    si (mensura(cur) > 0) { lines << cur^ }
+
+    // 2. Initialize 26 Hardware Registers (a-z)
+    vas regs : arr -> []^
+    i -> 0^ dum (i < 26) { regs << 0^ i -> i + 1^ }
+
+    // 3. The Execution Loop
+    vas pc : int -> 0^
+    vas limit : int -> 10000^ // Infinite loop hardware protection
+    vas cycles : int -> 0^
+    
+    dum (pc < mensura(lines) et cycles < limit) {
+        vas line : str -> lines[pc]^
+        vas l_len : int -> mensura(line)^
+        
+        // Micro-Nox Instruction Set
+        si (l_len > 6 et pars(line, 0, 7) == "prints ") {
+            send_msg(node_idx, "IPC:" + pars(line, 7, l_len - 7) + "\n")^
+        } 
+        aliter si (l_len >= 6 et pars(line, 0, 6) == "print ") {
+            vas r_idx : int -> codex(pars(line, 6, 1)) - 97^ // 'a' = 0, 'b' = 1...
+            si (r_idx >= 0 et r_idx < 26) { send_msg(node_idx, "IPC:" + int_to_str(regs[r_idx]) + "\n")^ }
+        }
+        aliter si (l_len >= 6 et pars(line, 0, 4) == "let ") {
+            vas r_idx : int -> codex(pars(line, 4, 1)) - 97^
+            si (r_idx >= 0 et r_idx < 26) { regs[r_idx] -> str_to_int(pars(line, 6, l_len - 6))^ }
+        }
+        aliter si (l_len >= 6 et pars(line, 0, 4) == "add ") {
+            vas r_idx : int -> codex(pars(line, 4, 1)) - 97^
+            si (r_idx >= 0 et r_idx < 26) { regs[r_idx] -> regs[r_idx] + str_to_int(pars(line, 6, l_len - 6))^ }
+        }
+        aliter si (l_len >= 6 et pars(line, 0, 4) == "sub ") {
+            vas r_idx : int -> codex(pars(line, 4, 1)) - 97^
+            si (r_idx >= 0 et r_idx < 26) { regs[r_idx] -> regs[r_idx] - str_to_int(pars(line, 6, l_len - 6))^ }
+        }
+        aliter si (l_len >= 5 et pars(line, 0, 5) == "goto ") {
+            pc -> str_to_int(pars(line, 5, l_len - 5)) - 1^ // Jump to absolute line number
+        }
+        aliter si (l_len >= 8 et pars(line, 0, 4) == "jlt ") { 
+            // jlt [reg] [val] [line] (Jump if Less Than)
+            vas r_idx : int -> codex(pars(line, 4, 1)) - 97^
+            vas rest : str -> pars(line, 6, l_len - 6)^
+            vas sp : int -> 0^ vas j : int -> 0^
+            dum (j < mensura(rest)) { si (pars(rest, j, 1) == " ") { sp -> j^ j -> mensura(rest)^ } j -> j + 1^ }
+            
+            si (sp > 0 et r_idx >= 0 et r_idx < 26) {
+                vas cmp_v : int -> str_to_int(pars(rest, 0, sp))^
+                vas targ : int -> str_to_int(pars(rest, sp + 1, mensura(rest) - sp - 1))^
+                si (regs[r_idx] < cmp_v) { pc -> targ - 1^ }
+            }
+        }
+        pc -> pc + 1^
+        cycles -> cycles + 1^
+    }
+    send_msg(node_idx, "IPC:>> VM HALTED. CYCLES: " + int_to_str(cycles) + "\n")^
+}
+// ===================================================
+// VIRTUAL FILE SYSTEM (VFS)
+// ===================================================
+communis vfs_name : arr -> []^ communis vfs_start : arr -> []^ communis vfs_size : arr -> []^
+
+opus read_string(addr) {
+    vas out : str -> ""^ si (addr == 0) { reddo out^ }
+    vas i : int -> 0^
+    dum (verum) {
+        vas b : int -> scrutari(ptr_add(addr, i))^ si (b == 0) { abrumpere^ }
+        out -> out + signum_ex(b)^ i -> i + 1^
+    }
+    reddo out^
+}
+
+opus file_exists(target_name) {
+    vas i : int -> 0^
+    dum (i < mensura(vfs_name)) {
+        si (vfs_name[i] == target_name) { reddo 1^ }
+        i -> i + 1^
+    }
+    reddo 0^
+}
+
+opus write_file(target_name, content) {
+    vas len : int -> mensura(content)^
+    vas alloc_len : int -> len^
+    si (alloc_len == 0) { alloc_len -> 1^ } // Anti INT-13 guard for 0-byte saves
+    
+    // Dynamically allocate aligned hardware RAM
+    vas new_addr : int -> malloc(alloc_len)^
+    
+    // Stream string content into physical memory
+    vas j : int -> 0^
+    dum (j < len) {
+        vas c : str -> pars(content, j, 1)^
+        mutare_mem(ptr_add(new_addr, j), codex(c))^
+        j -> j + 1^
+    }
+    
+    // Overwrite or Create in the VFS Registry
+    vas found : int -> 0^
+    vas i : int -> 0^
+    dum (i < mensura(vfs_name)) {
+        si (vfs_name[i] == target_name) {
+            vfs_start[i] -> new_addr^
+            vfs_size[i] -> len^
+            found -> 1^
+        }
+        i -> i + 1^
+    }
+    
+    si (found == 0) {
+        vfs_name << target_name^
+        vfs_start << new_addr^
+        vfs_size << len^
+    }
+}
+
+opus init_vfs() {
+    vas count : int -> read_32(0x5010)^ vas mods_addr : int -> read_32(0x5014)^
+    vas i : int -> 0^
+    dum (i < count) {
+        vas mod_ptr : int -> ptr_add(mods_addr, i * 16)^
+        vas m_start : int -> read_32(mod_ptr)^ vas m_end : int -> read_32(ptr_add(mod_ptr, 4))^
+        vas str_addr : int -> read_32(ptr_add(mod_ptr, 8))^
+        vas m_name : str -> read_string(str_addr)^
+        si (mensura(m_name) == 0) {
+            si (i == 0) { m_name -> "ash.nox"^ } aliter si (i == 1) { m_name -> "scriptor.nox"^ }
+            aliter si (i == 2) { m_name -> "umbrae.nox"^ } aliter { m_name -> "mod_" + int_to_str(i) + ".nox"^ }
+        }
+        vfs_name << m_name^ vfs_start << m_start^ vfs_size << (m_end - m_start)^
+        i -> i + 1^
+    }
+}
+
+opus read_file(target_name) {
+    vas i : int -> 0^
+    dum (i < mensura(vfs_name)) {
+        si (vfs_name[i] == target_name) {
+            vas addr : int -> vfs_start[i]^ vas size : int -> vfs_size[i]^
+            vas out : str -> ""^ vas j : int -> 0^
+            dum (j < size) { out -> out + signum_ex(scrutari(ptr_add(addr, j)))^ j -> j + 1^ }
+            reddo out^
+        }
+        i -> i + 1^
+    }
+    reddo "ERROR: File not found: " + target_name^
+}
+
+// ===================================================
+// DYNAMIC MEMORY MANAGEMENT
+// ===================================================
+opus remove_wire(w_idx) {
+    vas new_f : arr -> []^ vas new_t : arr -> []^
+    vas i : int -> 0^
+    dum (i < mensura(wire_from)) { si (i != w_idx) { new_f << wire_from[i]^ new_t << wire_to[i]^ } i -> i + 1^ }
+    wire_from -> new_f^ wire_to -> new_t^
+}
+
+opus remove_actor(n_idx) {
+    si (actor_app[n_idx] != -1) {
+        spawn_particles(actor_x[n_idx], actor_y[n_idx], actor_w[n_idx], actor_h[n_idx])^
+    }
+
+    vas w : int -> mensura(wire_from) - 1^
+    dum (w >= 0) { si (wire_from[w] == n_idx vel wire_to[w] == n_idx) { remove_wire(w)^ } w -> w - 1^ }
+
+    // [CRITICAL FIX] Tombstone State! Never shrink the arrays! Zero Memory Leaks!
+    actor_app[n_idx] -> -1^
+
+    si (focused_node == n_idx) { focused_node -> -1^ }
+    si (routing_node == n_idx) { routing_node -> -1^ }
+    si (resizing_node == n_idx) { resizing_node -> -1^ }
+
+    si (paradigm == 1) { apply_layout()^ }
+}
+
+// ===================================================
+// THE AESTHETIC COMPOSITOR
+// ===================================================
+opus clear_screen_fast() {
+    si (paradigm == 1) { draw_rect(0, 0, FB_WIDTH, FB_HEIGHT, 5, 5, 8)^ }
+    aliter { draw_rect(0, 0, FB_WIDTH, FB_HEIGHT, 0, 0, 0)^ }
+}
+
+opus render_frame() {
+    clear_screen_fast()^
+
+    vas w : int -> 0^
+    dum (w < mensura(wire_from)) {
+        vas f_idx : int -> wire_from[w]^ vas t_idx : int -> wire_to[w]^
+        vas fx : int -> world_to_screen_x(actor_x[f_idx] + (actor_w[f_idx] / 2))^
+        vas fy : int -> world_to_screen_y(actor_y[f_idx] + (actor_h[f_idx] / 2))^
+        vas tx : int -> world_to_screen_x(actor_x[t_idx] + (actor_w[t_idx] / 2))^
+        vas ty : int -> world_to_screen_y(actor_y[t_idx] + (actor_h[t_idx] / 2))^
+        si (paradigm == 1) { draw_line(fx, fy, tx, ty, 255, 0, 150)^ }
+        aliter { draw_line(fx, fy, tx, ty, 0, 255, 100)^ }
+        w -> w + 1^
+    }
+
+    si (routing_node != -1) {
+        vas rx : int -> world_to_screen_x(actor_x[routing_node] + (actor_w[routing_node] / 2))^
+        vas ry : int -> world_to_screen_y(actor_y[routing_node] + (actor_h[routing_node] / 2))^
+        draw_line(rx, ry, mouse_x, mouse_y, 255, 255, 0)^
+    }
+
+    vas i : int -> 0^
+    dum (i < mensura(actor_x)) {
+        si (actor_app[i] != -1) { // Skip dead nodes!
+            si (focused_node == i vel routing_node == i) {
+                draw_zui_node(actor_x[i], actor_y[i], actor_w[i], actor_h[i], 0, 255, 255)^
+                si (paradigm == 0) {
+                    vas h_x : int -> world_to_screen_x(actor_x[i] + actor_w[i] - 15)^
+                    vas h_y : int -> world_to_screen_y(actor_y[i] + actor_h[i] - 15)^
+                    draw_rect(h_x, h_y, scale_size(15), scale_size(15), 0, 255, 255)^
+                }
+            } aliter {
+                draw_zui_node(actor_x[i], actor_y[i], actor_w[i], actor_h[i], 30, 30, 40)^
+            }
+            draw_zui_string_clipped(actor_x[i] + 10, actor_y[i] + 10, actor_w[i] - 20, actor_h[i] - 20, 1, actor_text[i], 0, 255, 0)^
+        }
+        i -> i + 1^
+    }
+
+    render_particles()^
+
+    vas ob_h : int -> 40^ vas ob_y : int -> FB_HEIGHT - ob_h - 10^
+    draw_rect(10, ob_y, FB_WIDTH - 20, ob_h, 15, 15, 20)^
+    si (focused_node == -1) { draw_rect(10, ob_y, FB_WIDTH - 20, 2, 255, 0, 255)^ }
+    aliter { draw_rect(10, ob_y, FB_WIDTH - 20, 2, 50, 50, 50)^ }
+
+    vas prompt : str -> "ORDER//CONSTRUCT> "^
+    si (paradigm == 0) { prompt -> "CHAOS//VOID> "^ }
+    si (focused_node == -1) { prompt -> prompt + omni_text + "_"^ } aliter { prompt -> prompt + omni_text^ }
+    draw_raw_string(20, ob_y + 12, 2, prompt, 255, 255, 255)^
+
+    draw_reticle()^ swap_buffers()^
+}
+
+opus get_hovered_node(wx, wy) {
+    vas i : int -> mensura(actor_x) - 1^
+    dum (i >= 0) {
+        si (actor_app[i] != -1) { // Ignore dead nodes
+            vas nx : int -> actor_x[i]^ vas ny : int -> actor_y[i]^
+            vas nw : int -> actor_w[i]^ vas nh : int -> actor_h[i]^
+            si (wx >= nx et wx <= nx + nw et wy >= ny et wy <= ny + nh) { reddo i^ }
+        }
+        i -> i - 1^
+    }
+    reddo -1^
+}
+
+opus get_hovered_corner(wx, wy) {
+    vas i : int -> mensura(actor_x) - 1^
+    dum (i >= 0) {
+        si (actor_app[i] != -1) { // Ignore dead nodes
+            vas nx : int -> actor_x[i]^ vas ny : int -> actor_y[i]^
+            vas nw : int -> actor_w[i]^ vas nh : int -> actor_h[i]^
+            si (wx >= nx + nw - 20 et wx <= nx + nw et wy >= ny + nh - 20 et wy <= ny + nh) { reddo i^ }
+        }
+        i -> i - 1^
+    }
+    reddo -1^
+}
+
+// ===================================================
+// IPC & CAPABILITY SCHEDULER
+// ===================================================
+opus send_msg(target_id, msg) {
+    si (target_id >= 0 et target_id < mensura(actor_mailbox)) { actor_mailbox[target_id] -> actor_mailbox[target_id] + msg + "`"^ }
+}
+
+opus scheduler_tick() {
+    vas i : int -> 0^ dum (i < mensura(actor_budget)) { actor_budget[i] -> 5^ i -> i + 1^ }
+
+    i -> 0^
+    dum (i < mensura(actor_mailbox)) {
+        si (actor_app[i] != -1) { // Only execute alive nodes!
+            vas is_processing : int -> 1^
+            dum (is_processing == 1) {
+                si (actor_budget[i] <= 0) {
+                    is_processing -> 0^
+                } aliter {
+                    vas box : str -> actor_mailbox[i]^ vas box_len : int -> mensura(box)^
+                    si (box_len > 0) {
+                        vas m_idx : int -> 0^ vas msg : str -> ""^
+                        dum (m_idx < box_len) {
+                            vas c : str -> pars(box, m_idx, 1)^
+                            si (c == "`") { m_idx -> box_len^ } aliter { msg -> msg + c^ }
+                            m_idx -> m_idx + 1^
+                        }
+
+                        vas rem_len : int -> box_len - mensura(msg) - 1^
+                        si (rem_len > 0) { actor_mailbox[i] -> pars(box, mensura(msg) + 1, rem_len)^ }
+                        aliter { actor_mailbox[i] -> ""^ }
+
+                        vas should_clear : int -> 0^
+
+                        si (msg == "BACKSPACE") {
+                            vas t_len : int -> mensura(actor_text[i])^ vas c_len : int -> mensura(actor_cmd[i])^
+                            si (c_len > 1) { actor_text[i] -> pars(actor_text[i], 0, t_len - 1)^ actor_cmd[i] -> pars(actor_cmd[i], 0, c_len - 1)^ }
+                            aliter si (c_len == 1) { actor_text[i] -> pars(actor_text[i], 0, t_len - 1)^ actor_cmd[i] -> ""^ }
+                        } aliter si (msg == "ENTER") {
+                            vas cmd : str -> actor_cmd[i]^
+                            actor_text[i] -> actor_text[i] + signum_ex(10)^ actor_cmd[i] -> ""^
+                            vas out : str -> ""^ vas app_mode : int -> actor_app[i]^
+
+                            // Prevent short-circuit flaws
+                            // Prefix Parsers
+                            vas prefix_run : str -> ""^ si (mensura(cmd) > 4) { prefix_run -> pars(cmd, 0, 4)^ }
+                            vas prefix_rev : str -> ""^ si (mensura(cmd) > 9) { prefix_rev -> pars(cmd, 0, 9)^ }
+                            vas prefix_read : str -> ""^ si (mensura(cmd) > 5) { prefix_read -> pars(cmd, 0, 5)^ }
+                            vas prefix_edit : str -> ""^ si (mensura(cmd) > 5) { prefix_edit -> pars(cmd, 0, 5)^ }
+                            
+                            si (app_mode == 0) { 
+                                si (cmd == "ping") { out -> "pong\n"^ }
+                                aliter si (cmd == "los") { vas n : int -> 0^ dum (n < mensura(vfs_name)) { out -> out + vfs_name[n] + " (" + int_to_str(vfs_size[n]) + " B)\n"^ n -> n + 1^ } }
+                                aliter si (prefix_read == "read ") { vas fname : str -> pars(cmd, 5, mensura(cmd) - 5)^ out -> read_file(fname) + "\n"^ }
+                                aliter si (prefix_edit == "edit ") {
+                                    vas fname : str -> pars(cmd, 5, mensura(cmd) - 5)^
+                                    actor_app[i] -> 2^
+                                    actor_target[i] -> fname^
+                                    si (file_exists(fname)) { actor_file_buf[i] -> read_file(fname)^ } 
+                                    aliter { actor_file_buf[i] -> ""^ }
+                                    out -> ">> SCRIPTOR ONLINE. EDITING: " + fname + "\n[COMMANDS: :w (save), :p (print), :q (exit)]\n"^
+                                }
+                                aliter si (prefix_run == "run ") {
+                                    vas target : str -> pars(cmd, 4, mensura(cmd) - 4)^
+                                    si (target == "ash.nox") { actor_app[i] -> 1^ out -> ">> ASH SHELL INJECTED...\n"^ } 
+                                    aliter si (target == "scriptor.nox") { actor_app[i] -> 2^ out -> ">> SCRIPTOR ONLINE.\n"^ } 
+                                    aliter si (file_exists(target)) {
+                                        vas file_data : str -> read_file(target)^
+                                        // [NEW] Check for full Achlys script vs Micro-VM
+                                        si (pars(target, mensura(target) - 4, 4) == ".nox") {
+                                            execute_achlys_script(i, file_data)^
+                                        } aliter {
+                                            out -> ">> EXECUTING MICRO-VM BINARY...\n"^
+                                            sys_exec(i, file_data)^ 
+                                        }
+                                    }
+                                    aliter { out -> "Execution denied or file missing: " + target + "\n"^ }
+                                }
+                                aliter si (cmd == "lspci") {
+                                    out -> ">> SCANNING MOTHERBOARD...\n"^
+                                    vas bus : int -> 0^
+                                    dum (bus < 256) {
+                                        vas slot : int -> 0^
+                                        dum (slot < 32) {
+                                            vas vendor : int -> pci_get_vendor(bus, slot)^
+                                            si (vendor != 0xFFFF) { 
+                                                vas device : int -> pci_get_device(bus, slot)^
+                                                out -> out + "BUS " + int_to_str(bus) + " SLOT " + int_to_str(slot) + " -> VENDOR: " + int_to_str(vendor) + " | DEVICE: " + int_to_str(device) + "\n"^
+                                                
+                                                // Mount the Intel E1000 Gigabit Card!
+                                                si (vendor == 32902 et device == 4110) {
+                                                    vas mmio : int -> init_e1000(bus, slot)^
+                                                    init_e1000_tx()^ 
+                                                    init_e1000_rx()^ // [NEW] Boot the Receiver
+                                                    out -> out + "[!] E1000 NIC MOUNTED AT MMIO BASE: " + int_to_str(mmio) + "\n"^
+                                                    out -> out + "[!] MAC ADDRESS SECURED: " + get_mac_address() + "\n"^
+                                                    out -> out + "[!] TX/RX RING BUFFERS: ONLINE AND ARMED.\n"^
+                                                }
+                                            }
+                                            slot -> slot + 1^
+                                        }
+                                        bus -> bus + 1^
+                                    }
+                                }
+                                aliter si (cmd == "tx_test") {
+                                    si (E1000_BAR == 0) { out -> ">> ERR: NIC NOT MOUNTED. RUN lspci.\n"^ }
+                                    aliter {
+                                        // 1. Allocate 64 bytes (Minimum Ethernet Frame size)
+                                        vas frame : int -> malloc(64)^
+                                        fast_fill32(frame, 0, 16)^ // Zero out all 64 bytes
+                                        
+                                        // 2. L2 ETHERNET HEADER (14 Bytes)
+                                        // Dest MAC: Broadcast (FF:FF:FF:FF:FF:FF)
+                                        mutare_mem(ptr_add(frame, 0), 255)^ mutare_mem(ptr_add(frame, 1), 255)^
+                                        mutare_mem(ptr_add(frame, 2), 255)^ mutare_mem(ptr_add(frame, 3), 255)^
+                                        mutare_mem(ptr_add(frame, 4), 255)^ mutare_mem(ptr_add(frame, 5), 255)^
+                                        
+                                        // Source MAC: QEMU Default (52:54:00:12:34:56)
+                                        mutare_mem(ptr_add(frame, 6), 82)^ mutare_mem(ptr_add(frame, 7), 84)^
+                                        mutare_mem(ptr_add(frame, 8), 0)^ mutare_mem(ptr_add(frame, 9), 18)^
+                                        mutare_mem(ptr_add(frame, 10), 52)^ mutare_mem(ptr_add(frame, 11), 86)^
+                                        
+                                        // EtherType: ARP (0x0806)
+                                        mutare_mem(ptr_add(frame, 12), 8)^ mutare_mem(ptr_add(frame, 13), 6)^
+                                        
+                                        // 3. L2.5 ARP HEADER (28 Bytes)
+                                        vas arp : int -> ptr_add(frame, 14)^
+                                        // Hardware Type: Ethernet (1), Protocol Type: IPv4 (0x0800)
+                                        mutare_mem(ptr_add(arp, 0), 0)^ mutare_mem(ptr_add(arp, 1), 1)^
+                                        mutare_mem(ptr_add(arp, 2), 8)^ mutare_mem(ptr_add(arp, 3), 0)^
+                                        // HW Size: 6, Protocol Size: 4, Opcode: Request (1)
+                                        mutare_mem(ptr_add(arp, 4), 6)^ mutare_mem(ptr_add(arp, 5), 4)^
+                                        mutare_mem(ptr_add(arp, 6), 0)^ mutare_mem(ptr_add(arp, 7), 1)^
+                                        
+                                        // Sender MAC (52:54:00:12:34:56)
+                                        mutare_mem(ptr_add(arp, 8), 82)^ mutare_mem(ptr_add(arp, 9), 84)^
+                                        mutare_mem(ptr_add(arp, 10), 0)^ mutare_mem(ptr_add(arp, 11), 18)^
+                                        mutare_mem(ptr_add(arp, 12), 52)^ mutare_mem(ptr_add(arp, 13), 86)^
+                                        
+                                        // Sender IP: 10.0.2.15 (QEMU Guest)
+                                        mutare_mem(ptr_add(arp, 14), 10)^ mutare_mem(ptr_add(arp, 15), 0)^
+                                        mutare_mem(ptr_add(arp, 16), 2)^ mutare_mem(ptr_add(arp, 17), 15)^
+                                        
+                                        // Target MAC: 00:00:00:00:00:00 (Blank for request)
+                                        // Target IP: 10.0.2.2 (QEMU Host Router)
+                                        mutare_mem(ptr_add(arp, 24), 10)^ mutare_mem(ptr_add(arp, 25), 0)^
+                                        mutare_mem(ptr_add(arp, 26), 2)^ mutare_mem(ptr_add(arp, 27), 2)^
+                                        
+                                        // 4. FIRE DMA ENGINE
+                                        out -> ">> [DMA] INJECTING L2 ARP REQUEST FRAME...\n"^
+                                        vas status_ptr : int -> e1000_transmit(frame, 64)^
+                                        
+                                        // 5. HARDWARE POLLING (QEMU TCG Starvation Bypass)
+                                        vas timeout : int -> 100000^
+                                        vas done : int -> 0^
+                                        dum (timeout > 0 et done == 0) {
+                                            // [CRITICAL FIX] Use ptr_add here as well!
+                                            vas head : int -> mem_read_32(ptr_add(E1000_BAR, 0x3810))^
+                                            
+                                            si (head == E1000_TX_TAIL) { done -> 1^ }
+                                            timeout -> timeout - 1^
+                                        }
+                                        
+                                        si (done) { out -> out + ">> [HW] E1000 CONFIRMS TRANSMISSION SUCCESS!\n"^ } 
+                                        aliter { out -> out + ">> [HW] ERR: NIC TIMEOUT. DMA FAILED.\n"^ }
+                                    }
+                                }
+                                aliter si (cmd == "rx_test") {
+                                    si (E1000_BAR == 0) { out -> ">> ERR: NIC NOT MOUNTED. RUN lspci.\n"^ }
+                                    aliter {
+                                        vas pkt : int -> e1000_poll_rx()^
+                                        si (pkt != 0) {
+                                            out -> ">> [RX] PACKET SECURED! LENGTH: " + int_to_str(E1000_RX_LEN) + " BYTES\n"^
+                                            out -> out + ">> [RX] PAYLOAD DUMP (DECIMAL):\n"^
+                                            
+                                            // Extract the first 42 bytes (Standard ARP Reply Length)
+                                            vas j : int -> 0^
+                                            vas dump : str -> ""^
+                                            dum (j < E1000_RX_LEN et j < 42) { 
+                                                vas b : int -> scrutari(ptr_add(pkt, j))^
+                                                dump -> dump + int_to_str(b) + " "^
+                                                j -> j + 1^
+                                            }
+                                            out -> out + dump + "\n"^
+                                        } aliter {
+                                            out -> ">> [RX] SILENCE. NO PACKETS IN BUFFER.\n"^
+                                        }
+                                    }
+                                }
+                                aliter si (cmd == "dns_test") {
+                                    si (E1000_BAR == 0) { out -> ">> ERR: NIC NOT MOUNTED. RUN lspci.\n"^ }
+                                    aliter {
+                                        vas frame : int -> malloc(128)^
+                                        vas z : int -> 0^ dum (z < 128) { mutare_mem(ptr_add(frame, z), 0)^ z -> z + 1^ }
+
+                                        // LAYER 2: ETHERNET HEADER (14 Bytes)
+                                        mutare_mem(ptr_add(frame, 0), 82)^ mutare_mem(ptr_add(frame, 1), 85)^ mutare_mem(ptr_add(frame, 2), 10)^ mutare_mem(ptr_add(frame, 3), 0)^ mutare_mem(ptr_add(frame, 4), 2)^ mutare_mem(ptr_add(frame, 5), 3)^
+                                        mutare_mem(ptr_add(frame, 6), 82)^ mutare_mem(ptr_add(frame, 7), 84)^ mutare_mem(ptr_add(frame, 8), 0)^ mutare_mem(ptr_add(frame, 9), 18)^ mutare_mem(ptr_add(frame, 10), 52)^ mutare_mem(ptr_add(frame, 11), 86)^
+                                        mutare_mem(ptr_add(frame, 12), 8)^ mutare_mem(ptr_add(frame, 13), 0)^
+
+                                        // LAYER 3: IPv4 HEADER (20 Bytes)
+                                        vas ip : int -> ptr_add(frame, 14)^
+                                        mutare_mem(ptr_add(ip, 0), 69)^ mutare_mem(ptr_add(ip, 1), 0)^
+                                        mutare_mem(ptr_add(ip, 2), 0)^ mutare_mem(ptr_add(ip, 3), 56)^
+                                        mutare_mem(ptr_add(ip, 4), 18)^ mutare_mem(ptr_add(ip, 5), 52)^
+                                        mutare_mem(ptr_add(ip, 6), 0)^ mutare_mem(ptr_add(ip, 7), 0)^
+                                        mutare_mem(ptr_add(ip, 8), 64)^ mutare_mem(ptr_add(ip, 9), 17)^
+                                        mutare_mem(ptr_add(ip, 10), 80)^ mutare_mem(ptr_add(ip, 11), 112)^
+                                        mutare_mem(ptr_add(ip, 12), 10)^ mutare_mem(ptr_add(ip, 13), 0)^ mutare_mem(ptr_add(ip, 14), 2)^ mutare_mem(ptr_add(ip, 15), 15)^
+                                        mutare_mem(ptr_add(ip, 16), 10)^ mutare_mem(ptr_add(ip, 17), 0)^ mutare_mem(ptr_add(ip, 18), 2)^ mutare_mem(ptr_add(ip, 19), 3)^
+
+                                        // LAYER 4: UDP HEADER (8 Bytes)
+                                        vas udp : int -> ptr_add(frame, 34)^
+                                        mutare_mem(ptr_add(udp, 0), 192)^ mutare_mem(ptr_add(udp, 1), 0)^
+                                        mutare_mem(ptr_add(udp, 2), 0)^ mutare_mem(ptr_add(udp, 3), 53)^
+                                        mutare_mem(ptr_add(udp, 4), 0)^ mutare_mem(ptr_add(udp, 5), 36)^
+                                        mutare_mem(ptr_add(udp, 6), 0)^ mutare_mem(ptr_add(udp, 7), 0)^
+
+                                        // LAYER 7: DNS PAYLOAD (28 Bytes)
+                                        vas dns : int -> ptr_add(frame, 42)^
+                                        mutare_mem(ptr_add(dns, 0), 18)^ mutare_mem(ptr_add(dns, 1), 52)^
+                                        mutare_mem(ptr_add(dns, 2), 1)^ mutare_mem(ptr_add(dns, 3), 0)^
+                                        mutare_mem(ptr_add(dns, 4), 0)^ mutare_mem(ptr_add(dns, 5), 1)^
+                                        mutare_mem(ptr_add(dns, 6), 0)^ mutare_mem(ptr_add(dns, 7), 0)^
+                                        mutare_mem(ptr_add(dns, 8), 0)^ mutare_mem(ptr_add(dns, 9), 0)^
+                                        mutare_mem(ptr_add(dns, 10), 0)^ mutare_mem(ptr_add(dns, 11), 0)^
+                                        
+                                        mutare_mem(ptr_add(dns, 12), 6)^ mutare_mem(ptr_add(dns, 13), 103)^
+                                        mutare_mem(ptr_add(dns, 14), 111)^ mutare_mem(ptr_add(dns, 15), 111)^
+                                        mutare_mem(ptr_add(dns, 16), 103)^ mutare_mem(ptr_add(dns, 17), 108)^
+                                        mutare_mem(ptr_add(dns, 18), 101)^ mutare_mem(ptr_add(dns, 19), 3)^
+                                        mutare_mem(ptr_add(dns, 20), 99)^ mutare_mem(ptr_add(dns, 21), 111)^
+                                        mutare_mem(ptr_add(dns, 22), 109)^ mutare_mem(ptr_add(dns, 23), 0)^
+                                        
+                                        mutare_mem(ptr_add(dns, 24), 0)^ mutare_mem(ptr_add(dns, 25), 1)^
+                                        mutare_mem(ptr_add(dns, 26), 0)^ mutare_mem(ptr_add(dns, 27), 1)^
+
+                                        out -> ">> [DNS] FORGING IPv4/UDP QUERY FOR 'google.com'...\n"^
+                                        
+                                        // [CRITICAL FIX] The Cache Flush Fence
+                                        vas flush : int -> mem_read_32(ptr_add(E1000_BAR, 0x5400))^
+                                        vas status_ptr : int -> e1000_transmit(frame, 70)^
+
+                                        vas timeout : int -> 100000^
+                                        vas done : int -> 0^
+                                        dum (timeout > 0 et done == 0) {
+                                            vas head : int -> mem_read_32(ptr_add(E1000_BAR, 0x3810))^
+                                            si (head == E1000_TX_TAIL) { done -> 1^ }
+                                            timeout -> timeout - 1^
+                                        }
+
+                                        si (done) { 
+                                            out -> out + ">> [HW] TRANSMISSION SUCCESS! WAITING FOR DNS REPLY...\n"^ 
+
+                                            vas rx_timeout : int -> 20000000^ 
+                                            vas reply_pkt : int -> 0^
+                                            dum (rx_timeout > 0 et reply_pkt == 0) {
+                                                vas yield : int -> mem_read_32(ptr_add(E1000_BAR, 0x2810))^
+                                                vas tmp_pkt : int -> e1000_poll_rx()^
+                                                si (tmp_pkt != 0) {
+                                                    vas e_type : int -> scrutari(ptr_add(tmp_pkt, 12))^
+                                                    si (e_type == 8) {
+                                                        vas proto : int -> scrutari(ptr_add(tmp_pkt, 23))^
+                                                        si (proto == 17) { 
+                                                            reply_pkt -> tmp_pkt^ 
+                                                        }
+                                                    }
+                                                }
+                                                rx_timeout -> rx_timeout - 1^
+                                            }
+
+                                            si (reply_pkt != 0) {
+                                                out -> out + ">> [DNS] UDP REPLY SECURED! DECODING...\n"^
+                                                vas ip1 : int -> scrutari(ptr_add(reply_pkt, 82))^
+                                                vas ip2 : int -> scrutari(ptr_add(reply_pkt, 83))^
+                                                vas ip3 : int -> scrutari(ptr_add(reply_pkt, 84))^
+                                                vas ip4 : int -> scrutari(ptr_add(reply_pkt, 85))^
+                                                out -> out + ">> [DNS] google.com = " + int_to_str(ip1) + "." + int_to_str(ip2) + "." + int_to_str(ip3) + "." + int_to_str(ip4) + "\n"^
+                                            } aliter {
+                                                out -> out + ">> [ERR] RX TIMEOUT. NO DNS REPLY RECEIVED.\n"^
+                                            }
+                                        } aliter { out -> out + ">> [HW] ERR: NIC TIMEOUT. DMA FAILED.\n"^ }
+                                    }
+                                }
+                                aliter si (cmd == "tcp_strike") {
+                                    si (E1000_BAR == 0) { out -> ">> ERR: NIC NOT MOUNTED. RUN lspci.\n"^ }
+                                    aliter {
+                                        out -> ">> [DIAGNOSTIC] FLUSHING RX RING AND FIRING TCP SYN...\n"^
+                                        
+                                        // 1. FLUSH THE GHOSTS FROM THE BUFFER
+                                        dum (e1000_poll_rx() != 0) {} 
+
+                                        // 2. FORGE THE STATIC MISSILE
+                                        vas f : int -> malloc(64)^
+                                        fast_fill32(f, 0, 16)^
+                                        
+                                        // Dst MAC: QEMU Router | Src MAC: Extracted from Silicon
+                                        mutare_mem(ptr_add(f, 0), 82)^ mutare_mem(ptr_add(f, 1), 85)^ mutare_mem(ptr_add(f, 2), 10)^ mutare_mem(ptr_add(f, 3), 0)^ mutare_mem(ptr_add(f, 4), 2)^ mutare_mem(ptr_add(f, 5), 2)^
+                                        vas ral : int -> mem_read_32(ptr_add(E1000_BAR, 0x5400))^
+                                        vas rah : int -> mem_read_32(ptr_add(E1000_BAR, 0x5404))^
+                                        mutare_mem(ptr_add(f, 6), ral & 255)^ mutare_mem(ptr_add(f, 7), (ral >>> 8) & 255)^ mutare_mem(ptr_add(f, 8), (ral >>> 16) & 255)^ mutare_mem(ptr_add(f, 9), (ral >>> 24) & 255)^ mutare_mem(ptr_add(f, 10), rah & 255)^ mutare_mem(ptr_add(f, 11), (rah >>> 8) & 255)^
+                                        
+                                        // EtherType: IPv4
+                                        mutare_mem(ptr_add(f, 12), 8)^ mutare_mem(ptr_add(f, 13), 0)^
+                                        
+                                        // IPv4 Header (Target: 1.1.1.1)
+                                        vas ip : int -> ptr_add(f, 14)^
+                                        mutare_mem(ptr_add(ip, 0), 69)^ mutare_mem(ptr_add(ip, 1), 0)^
+                                        mutare_mem(ptr_add(ip, 2), 0)^ mutare_mem(ptr_add(ip, 3), 40)^
+                                        mutare_mem(ptr_add(ip, 4), 17)^ mutare_mem(ptr_add(ip, 5), 17)^
+                                        mutare_mem(ptr_add(ip, 6), 64)^ mutare_mem(ptr_add(ip, 7), 0)^
+                                        mutare_mem(ptr_add(ip, 8), 64)^ mutare_mem(ptr_add(ip, 9), 6)^
+                                        mutare_mem(ptr_add(ip, 10), 27)^ mutare_mem(ptr_add(ip, 11), 175)^ // Hardcoded IP Checksum
+                                        mutare_mem(ptr_add(ip, 12), 10)^ mutare_mem(ptr_add(ip, 13), 0)^ mutare_mem(ptr_add(ip, 14), 2)^ mutare_mem(ptr_add(ip, 15), 15)^
+                                        mutare_mem(ptr_add(ip, 16), 1)^ mutare_mem(ptr_add(ip, 17), 1)^ mutare_mem(ptr_add(ip, 18), 1)^ mutare_mem(ptr_add(ip, 19), 1)^
+                                        
+                                        // TCP Header (Target Port: 80, SYN)
+                                        vas tcp : int -> ptr_add(f, 34)^
+                                        mutare_mem(ptr_add(tcp, 0), 192)^ mutare_mem(ptr_add(tcp, 1), 0)^
+                                        mutare_mem(ptr_add(tcp, 2), 0)^ mutare_mem(ptr_add(tcp, 3), 80)^
+                                        mutare_mem(ptr_add(tcp, 4), 0)^ mutare_mem(ptr_add(tcp, 5), 0)^ mutare_mem(ptr_add(tcp, 6), 0)^ mutare_mem(ptr_add(tcp, 7), 0)^
+                                        mutare_mem(ptr_add(tcp, 8), 0)^ mutare_mem(ptr_add(tcp, 9), 0)^ mutare_mem(ptr_add(tcp, 10), 0)^ mutare_mem(ptr_add(tcp, 11), 0)^
+                                        mutare_mem(ptr_add(tcp, 12), 80)^ mutare_mem(ptr_add(tcp, 13), 2)^
+                                        mutare_mem(ptr_add(tcp, 14), 255)^ mutare_mem(ptr_add(tcp, 15), 255)^
+                                        mutare_mem(ptr_add(tcp, 16), 225)^ mutare_mem(ptr_add(tcp, 17), 129)^ // Hardcoded TCP Checksum
+                                        mutare_mem(ptr_add(tcp, 18), 0)^ mutare_mem(ptr_add(tcp, 19), 0)^
+                                        
+                                        e1000_transmit(f, 64)^
+                                        
+                                        // 3. STRICT IPV4 HARDWARE POLLING
+                                        vas rx_timeout : int -> 100000000^
+                                        vas caught : int -> 0^
+                                        
+                                        dum (rx_timeout > 0 et caught == 0) {
+                                            vas yield : int -> mem_read_32(ptr_add(E1000_BAR, 0x2810))^
+                                            vas tmp_pkt : int -> e1000_poll_rx()^
+                                            si (tmp_pkt != 0) {
+                                                vas e_hi : int -> scrutari(ptr_add(tmp_pkt, 12))^
+                                                vas e_lo : int -> scrutari(ptr_add(tmp_pkt, 13))^
+                                                si (e_hi == 8 et e_lo == 0) { // STRICTLY ALLOW IPv4 ONLY
+                                                    caught -> tmp_pkt^
+                                                }
+                                            }
+                                            rx_timeout -> rx_timeout - 1^
+                                        }
+
+                                        si (caught != 0) {
+                                            vas dump : str -> ">> IPV4 DUMP: "^
+                                            vas k : int -> 0^
+                                            dum (k < 54) { // Dump exactly up to the TCP Flags
+                                                dump -> dump + int_to_str(scrutari(ptr_add(caught, k))) + " "^
+                                                k -> k + 1^
+                                            }
+                                            out -> out + dump + "\n"^
+                                        } aliter {
+                                            out -> out + ">> [ERR] ABSOLUTE SILENCE. HYPERVISOR DROPPED IT.\n"^
+                                        }
+                                    }
+                                }
+                                aliter si (cmd == "http_test") {
+                                    si (E1000_BAR == 0) { out -> ">> ERR: NIC NOT MOUNTED. RUN lspci.\n"^ }
+                                    aliter {
+                                        out -> ">> [TCP] INITIATING GHOST-BREAKER...\n"^
+                                        dum (e1000_poll_rx() != 0) {} 
+
+                                        tcp_global_seq -> tcp_global_seq + 1000^
+                                        vas my_port : int -> 40000 + (tcp_global_seq % 10000)^
+                                        vas my_seq : int -> tcp_global_seq^
+                                        
+                                        vas tx_frame : int -> e1000_send_syn(my_port, my_seq)^ 
+
+                                        vas rx_timeout : int -> 200000^ 
+                                        vas caught : int -> 0^
+                                        
+                                        dum (rx_timeout > 0 et caught == 0) {
+                                            vas yield : int -> mem_read_32(ptr_add(E1000_BAR, 0x2810))^
+                                            vas tmp_pkt : int -> e1000_poll_rx()^
+                                            si (tmp_pkt != 0) {
+                                                vas e_hi : int -> scrutari(ptr_add(tmp_pkt, 12))^ si (e_hi < 0) { e_hi -> e_hi + 256^ }
+                                                vas e_lo : int -> scrutari(ptr_add(tmp_pkt, 13))^ si (e_lo < 0) { e_lo -> e_lo + 256^ }
+                                                si (e_hi == 8 et e_lo == 0) { caught -> tmp_pkt^ }
+                                            }
+                                            rx_timeout -> rx_timeout - 1^
+                                        }
+
+                                        si (caught != 0) {
+                                            vas ip_ihl_ver : int -> scrutari(ptr_add(caught, 14))^ si (ip_ihl_ver < 0) { ip_ihl_ver -> ip_ihl_ver + 256^ }
+                                            vas ip_hdr_len : int -> (ip_ihl_ver % 16) * 4^
+                                            vas tcp_start : int -> 14 + ip_hdr_len^
+                                            vas proto : int -> scrutari(ptr_add(caught, 23))^ si (proto < 0) { proto -> proto + 256^ }
+                                            
+                                            si (proto == 6) { 
+                                                vas flags : int -> scrutari(ptr_add(caught, tcp_start + 13))^ si (flags < 0) { flags -> flags + 256^ }
+                                                
+                                                si (flags == 18 vel flags == 26) { 
+                                                    out -> out + ">> [TCP] SYN-ACK SECURED! FINALIZING HANDSHAKE...\n"^
+                                                    
+                                                    vas s_seq1 : int -> scrutari(ptr_add(caught, tcp_start + 4))^ si (s_seq1 < 0) { s_seq1 -> s_seq1 + 256^ }
+                                                    vas s_seq2 : int -> scrutari(ptr_add(caught, tcp_start + 5))^ si (s_seq2 < 0) { s_seq2 -> s_seq2 + 256^ }
+                                                    vas s_seq3 : int -> scrutari(ptr_add(caught, tcp_start + 6))^ si (s_seq3 < 0) { s_seq3 -> s_seq3 + 256^ }
+                                                    vas s_seq4 : int -> scrutari(ptr_add(caught, tcp_start + 7))^ si (s_seq4 < 0) { s_seq4 -> s_seq4 + 256^ }
+                                                    
+                                                    s_seq4 -> s_seq4 + 1^
+                                                    si (s_seq4 > 255) { s_seq4 -> 0^ s_seq3 -> s_seq3 + 1^ }
+                                                    si (s_seq3 > 255) { s_seq3 -> 0^ s_seq2 -> s_seq2 + 1^ }
+                                                    si (s_seq2 > 255) { s_seq2 -> 0^ s_seq1 -> s_seq1 + 1^ }
+                                                    si (s_seq1 > 255) { s_seq1 -> 0^ }
+                                                    
+                                                    e1000_send_ack(my_port, my_seq + 1, s_seq1, s_seq2, s_seq3, s_seq4)^ 
+                                                    
+                                                    vas slirp_delay : int -> 500000^
+                                                    dum (slirp_delay > 0) { slirp_delay -> slirp_delay - 1^ }
+
+                                                    out -> out + ">> [HTTP] ROUTE ESTABLISHED. TRANSMITTING 'GET /'...\n"^
+                                                    
+                                                    e1000_send_get(my_port, my_seq + 1, s_seq1, s_seq2, s_seq3, s_seq4)^ 
+                                                    
+                                                    rx_timeout -> 200000^ 
+                                                    vas http_pkt : int -> 0^
+                                                    dum (rx_timeout > 0 et http_pkt == 0) {
+                                                        vas yield_rx : int -> mem_read_32(ptr_add(E1000_BAR, 0x2810))^
+                                                        vas h_pkt : int -> e1000_poll_rx()^
+                                                        si (h_pkt != 0) {
+                                                            vas e_h_hi : int -> scrutari(ptr_add(h_pkt, 12))^ si (e_h_hi < 0) { e_h_hi -> e_h_hi + 256^ }
+                                                            vas e_h_lo : int -> scrutari(ptr_add(h_pkt, 13))^ si (e_h_lo < 0) { e_h_lo -> e_h_lo + 256^ }
+                                                            si (e_h_hi == 8 et e_h_lo == 0) {
+                                                                vas h_proto : int -> scrutari(ptr_add(h_pkt, 23))^ si (h_proto < 0) { h_proto -> h_proto + 256^ }
+                                                                si (h_proto == 6) { 
+                                                                    vas h_ihl : int -> scrutari(ptr_add(h_pkt, 14))^ si (h_ihl < 0) { h_ihl -> h_ihl + 256^ }
+                                                                    vas h_ip_len : int -> (h_ihl % 16) * 4^
+                                                                    vas h_tcp_start : int -> 14 + h_ip_len^
+                                                                    
+                                                                    vas data_off : int -> scrutari(ptr_add(h_pkt, h_tcp_start + 12))^ si (data_off < 0) { data_off -> data_off + 256^ }
+                                                                    vas h_tcp_hdr_len : int -> (data_off / 16) * 4^
+                                                                    
+                                                                    vas ip_b1 : int -> scrutari(ptr_add(h_pkt, 16))^ si (ip_b1 < 0) { ip_b1 -> ip_b1 + 256^ }
+                                                                    vas ip_b2 : int -> scrutari(ptr_add(h_pkt, 17))^ si (ip_b2 < 0) { ip_b2 -> ip_b2 + 256^ }
+                                                                    vas ip_tot_len : int -> (ip_b1 * 256) + ip_b2^
+                                                                    vas p_size : int -> ip_tot_len - h_ip_len - h_tcp_hdr_len^
+                                                                    
+                                                                    si (p_size > 0) {
+                                                                        http_pkt -> h_pkt^
+                                                                        E1000_RX_LEN -> p_size^ 
+                                                                        E1000_RX_CUR -> h_tcp_start + h_tcp_hdr_len^ 
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        rx_timeout -> rx_timeout - 1^
+                                                    }
+                                                    
+                                                    si (http_pkt != 0) {
+                                                        out -> out + ">> [HTTP] 200 OK! SERVER RESPONDED.\n"^
+                                                        out -> out + ">> [HTTP] PAYLOAD PREVIEW:\n---------------------\n"^
+                                                        vas pl_off : int -> E1000_RX_CUR^
+                                                        vas p_i : int -> 0^
+                                                        dum (p_i < E1000_RX_LEN et p_i < 80) { 
+                                                            vas bc : int -> scrutari(ptr_add(http_pkt, pl_off + p_i))^
+                                                            si (bc < 0) { bc -> bc + 256^ }
+                                                            si (bc >= 32 et bc <= 126 vel bc == 10) { out -> out + signum_ex(bc)^ }
+                                                            p_i -> p_i + 1^
+                                                        }
+                                                        out -> out + "\n...[EOF]\n---------------------\n"^
+                                                    } aliter { out -> out + ">> [ERR] RX TIMEOUT. NO HTTP REPLY.\n"^ }
+                                                } aliter { out -> out + ">> [ERR] CONNECTION RESET (RST). FLAGS: " + int_to_str(flags) + "\n"^ }
+                                            } aliter { out -> out + ">> [ERR] ROUTER RETURNED NON-TCP PACKET. PROTO: " + int_to_str(proto) + "\n"^ }
+                                        } aliter { 
+                                            out -> out + ">> [ERR] RX TIMEOUT. NO SYN-ACK CAUGHT.\n"^ 
+                                            vas dmp : str -> ">> TX DUMP: "^
+                                            vas k : int -> 0^
+                                            dum (k < 54) { 
+                                                vas d_b : int -> scrutari(ptr_add(tx_frame, k))^
+                                                si (d_b < 0) { d_b -> d_b + 256^ }
+                                                dmp -> dmp + int_to_str(d_b) + " "^ 
+                                                k -> k + 1^ 
+                                            }
+                                            out -> out + dmp + "\n"^
+                                        }
+                                    }
+                                }
+                                aliter si (cmd == "close") { remove_actor(i)^ is_processing -> 0^ } 
+                                aliter { si (mensura(cmd) > 0) { out -> "Unknown: " + cmd + "\n"^ } }
+                            } aliter si (app_mode == 1) { // ASH
+                                si (cmd == "identitas") { out -> "root\n"^ }
+                                aliter si (cmd == "enumerare") { vas n : int -> 0^ dum (n < mensura(vfs_name)) { out -> out + vfs_name[n] + "\n"^ n -> n + 1^ } }
+                                aliter si (prefix_rev == "revelare ") { vas fname : str -> pars(cmd, 9, mensura(cmd) - 9)^ out -> read_file(fname) + "\n"^ }
+                                aliter si (cmd == "exire") { actor_app[i] -> 0^ out -> ">> Exited.\n"^ }
+                                aliter { si (mensura(cmd) > 0) { out -> "Ignota: " + cmd + "\n"^ } }
+                            } aliter si (app_mode == 2) { // SCRIPTOR (Temporal RAM-FS Editor)
+                                si (cmd == ":q") { 
+                                    actor_app[i] -> 0^ out -> ">> Exited editor.\n"^ 
+                                } aliter si (cmd == ":w") {
+                                    write_file(actor_target[i], actor_file_buf[i])^
+                                    out -> ">> Saved " + actor_target[i] + " (" + int_to_str(mensura(actor_file_buf[i])) + " B)\n"^
+                                } aliter si (cmd == ":wq") {
+                                    write_file(actor_target[i], actor_file_buf[i])^
+                                    actor_app[i] -> 0^ out -> ">> Saved and exited.\n"^
+                                } aliter si (cmd == ":p") {
+                                    out -> "-- " + actor_target[i] + " --\n" + actor_file_buf[i] + "\n----------------\n"^
+                                } aliter { 
+                                    si (mensura(cmd) > 0) { actor_file_buf[i] -> actor_file_buf[i] + cmd + signum_ex(10)^ }
+                                }
+                            }
+
+                            si (is_processing == 1 et should_clear == 0) {
+                                si (mensura(out) > 0) {
+                                    vas routed : int -> 0^ vas w : int -> 0^
+                                    dum (w < mensura(wire_from)) { si (wire_from[w] == i) { send_msg(wire_to[w], "IPC:" + out)^ routed -> 1^ } w -> w + 1^ }
+                                    si (routed == 0) { actor_text[i] -> actor_text[i] + out^ }
+                                }
+                                vas np : str -> "> "^ si (actor_app[i] == 1) { np -> "[root::ACHLYS]~> "^ } aliter si (actor_app[i] == 2) { np -> "[EDIT]~> "^ }
+                                actor_text[i] -> actor_text[i] + np^
+                            }
+                        } aliter {
+                            vas prefix_ipc : str -> ""^ si (mensura(msg) >= 4) { prefix_ipc -> pars(msg, 0, 4)^ }
+                            si (prefix_ipc == "IPC:") { actor_text[i] -> actor_text[i] + pars(msg, 4, mensura(msg) - 4)^ }
+                            aliter { actor_text[i] -> actor_text[i] + msg^ actor_cmd[i] -> actor_cmd[i] + msg^ }
+                        }
+
+                        si (is_processing) { actor_budget[i] -> actor_budget[i] - 1^ }
+                    } aliter { is_processing -> 0^ }
+                }
+            }
+        }
+        i -> i + 1^
+    }
+}
+
+// [NEW] INTELLIMOUSE MAGIC NEGOTIATION
+opus init_mouse_advanced() {
+    mouse_wait(1)^ port_out(0x64, 0xA8)^
+    mouse_wait(1)^ port_out(0x64, 0x20)^
+    mouse_wait(0)^ vas status : int -> port_in(0x60) | 2^
+    mouse_wait(1)^ port_out(0x64, 0x60)^
+    mouse_wait(1)^ port_out(0x60, status)^
+    mouse_write(0xF6)^ mouse_read()^
+
+    // Send Secret Sequence: 200, 100, 80 to unlock Z-Axis!
+    mouse_write(0xF3)^ mouse_read()^ mouse_write(200)^ mouse_read()^
+    mouse_write(0xF3)^ mouse_read()^ mouse_write(100)^ mouse_read()^
+    mouse_write(0xF3)^ mouse_read()^ mouse_write(80)^ mouse_read()^
+
+    // Read Device ID
+    mouse_write(0xF2)^ mouse_read()^ vas id : int -> port_in(0x60)^
+    si (id == 3) { mouse_has_wheel -> 1^ }
+
+    mouse_write(0xF4)^ mouse_read()^
+}
+
+
+// ===================================================
+// THE HYBRID EVENT LOOP (TWM + ZUI)
+// ===================================================
+opus main() {
+    init_graphics()^ init_font()^ init_mouse_advanced()^ init_vfs()^ init_particles()^
+    vas running : int -> 1^ vas needs_render : int -> 1^
+    vas prev_l_down : int -> 0^ vas prev_r_down : int -> 0^
+    vas is_shifted : int -> 0^ vas is_caps : int -> 0^
+
+    dum (running) {
+        vas status : int -> port_in(0x64)^
+        si ((status & 1) == 1) {
+            si ((status & 32) == 32) {
+                vas byte1 : int -> port_in(0x60)^
+                si ((byte1 & 8) == 8) {
+                    mouse_wait(0)^ vas byte2 : int -> port_in(0x60)^
+                    mouse_wait(0)^ vas byte3 : int -> port_in(0x60)^
+                    vas byte4 : int -> 0^
+
+                    si (mouse_has_wheel) { mouse_wait(0)^ byte4 -> port_in(0x60)^ }
+
+                    vas rel_x : int -> byte2^ vas rel_y : int -> byte3^
+                    si (byte1 & 16) { rel_x -> rel_x | 0xFFFFFFFFFFFFFF00^ }
+                    si (byte1 & 32) { rel_y -> rel_y | 0xFFFFFFFFFFFFFF00^ }
+
+                    mouse_x -> mouse_x + rel_x^ mouse_y -> mouse_y - rel_y^
+                    si (mouse_x < 0) { mouse_x -> 0^ } si (mouse_x >= FB_WIDTH) { mouse_x -> FB_WIDTH - 1^ }
+                    si (mouse_y < 0) { mouse_y -> 0^ } si (mouse_y >= FB_HEIGHT) { mouse_y -> FB_HEIGHT - 1^ }
+
+                    si (paradigm == 0 et byte4 != 0) {
+                        vas z_delta : int -> byte4^
+                        si (z_delta > 127) { z_delta -> z_delta - 256^ } // Signed 8-bit Math
+                        cam_z -> cam_z - (z_delta * 10)^
+                        si (cam_z < 10) { cam_z -> 10^ }
+                    }
+
+                    mouse_l_down -> byte1 & 1^ mouse_r_down -> (byte1 >>> 1) & 1^
+                    vas wx : int -> screen_to_world_x(mouse_x)^
+                    vas wy : int -> screen_to_world_y(mouse_y)^
+                    vas hover_node : int -> get_hovered_node(wx, wy)^
+                    vas hover_corner : int -> get_hovered_corner(wx, wy)^
+
+                    si (mouse_l_down et prev_l_down == 0) {
+                        si (hover_node == -1 et hover_corner == -1) { focused_node -> -1^ }
+                        aliter si (paradigm == 0 et hover_corner != -1) {
+                            resizing_node -> hover_corner^ focused_node -> hover_corner^
+                        }
+                        aliter { focused_node -> hover_node^ }
+
+                        si (routing_node != -1) {
+                            si (hover_node != -1 et hover_node != routing_node) {
+                                vas exists : int -> -1^ vas w : int -> 0^
+                                dum (w < mensura(wire_from)) { si (wire_from[w] == routing_node et wire_to[w] == hover_node) { exists -> w^ } w -> w + 1^ }
+                                si (exists != -1) { remove_wire(exists)^ } aliter { wire_from << routing_node^ wire_to << hover_node^ }
+                            }
+                            routing_node -> -1^
+                        } aliter si (hover_corner == -1) {
+                            grabbed_node -> hover_node^
+                        }
+                    }
+
+                    si (mouse_r_down et prev_r_down == 0) {
+                        si (routing_node == -1) { si (hover_node != -1) { routing_node -> hover_node^ } } aliter { routing_node -> -1^ }
+                    }
+
+                    si (mouse_l_down == 0) { grabbed_node -> -1^ resizing_node -> -1^ }
+
+                    si (paradigm == 0 et mouse_l_down et resizing_node != -1) {
+                        actor_w[resizing_node] -> actor_w[resizing_node] + (rel_x * 100 / cam_z)^
+                        actor_h[resizing_node] -> actor_h[resizing_node] - (rel_y * 100 / cam_z)^
+                        si (actor_w[resizing_node] < 100) { actor_w[resizing_node] -> 100^ }
+                        si (actor_h[resizing_node] < 50) { actor_h[resizing_node] -> 50^ }
+                    } aliter si (paradigm == 0 et mouse_l_down et grabbed_node != -1) {
+                        actor_x[grabbed_node] -> actor_x[grabbed_node] + (rel_x * 100 / cam_z)^
+                        actor_y[grabbed_node] -> actor_y[grabbed_node] - (rel_y * 100 / cam_z)^
+                    } aliter si (paradigm == 0 et mouse_l_down et grabbed_node == -1 et routing_node == -1) {
+                        cam_x -> cam_x - (rel_x * 100 / cam_z)^
+                        cam_y -> cam_y + (rel_y * 100 / cam_z)^
+                    }
+
+                    prev_l_down -> mouse_l_down^ prev_r_down -> mouse_r_down^ needs_render -> 1^
+                }
+            } aliter {
+                // KEYBOARD ROUTER
+                vas k_code : int -> port_in(0x60)^
+                si (k_code >= 128) {
+                    vas rel_code : int -> k_code - 128^
+                    si (rel_code == 42 vel rel_code == 54) { is_shifted -> 0^ }
+                } aliter {
+                    si (k_code == 42 vel k_code == 54) { is_shifted -> 1^ }
+                    aliter si (k_code == 58) { si (is_caps == 1) { is_caps -> 0^ } aliter { is_caps -> 1^ } }
+
+                    // TAB: Skip tombstones!
+                    aliter si (k_code == 15 et mensura(actor_x) > 0) {
+                        vas limit : int -> mensura(actor_x)^ vas tries : int -> 0^
+                        dum (tries < limit) {
+                            focused_node -> (focused_node + 1) % mensura(actor_x)^
+                            si (actor_app[focused_node] != -1) { tries -> limit^ } // Found a living node!
+                            tries -> tries + 1^
+                        }
+                        needs_render -> 1^
+                    }
+
+                    aliter si (k_code == 60) {
+                        // RECYCLE TOMBSTONES
+                        vas slot : int -> -1^ vas c : int -> 0^
+                        dum (c < mensura(actor_x)) { si (actor_app[c] == -1 et slot == -1) { slot -> c^ } c -> c + 1^ }
+
+                        si (slot != -1) {
+                            actor_x[slot] -> cam_x + 100^ actor_y[slot] -> cam_y + 100^ 
+                            actor_w[slot] -> 400^ actor_h[slot] -> 300^
+                            actor_text[slot] -> "ROOT TERMINAL\n-------------\n> "^ actor_cmd[slot] -> ""^
+                            actor_mailbox[slot] -> ""^ actor_budget[slot] -> 0^ actor_app[slot] -> 0^
+                            actor_file_buf[slot] -> ""^ actor_target[slot] -> ""^ // [CRITICAL FIX] Clean Tombstones
+                            si (paradigm == 1) { apply_layout()^ } 
+                            focused_node -> slot^
+                        } aliter {
+                            actor_x << cam_x + 100^ actor_y << cam_y + 100^ 
+                            actor_w << 400^ actor_h << 300^
+                            actor_text << "ROOT TERMINAL\n-------------\n> "^ actor_cmd << ""^
+                            actor_mailbox << ""^ actor_budget << 0^ actor_app << 0^
+                            actor_file_buf << ""^ actor_target << ""^ // [CRITICAL FIX] Allocate New Arrays
+                            si (paradigm == 1) { apply_layout()^ } 
+                            focused_node -> mensura(actor_x) - 1^
+                        }
+                        needs_render -> 1^
+                    }
+                    aliter si (k_code == 1) {
+                        paradigm -> 1 - paradigm^
+                        si (paradigm == 1) {
+                            cam_x -> 0^ cam_y -> 0^ cam_z -> 100^
+                            apply_layout()^
+                            omni_text -> ">> PARADIGM SHIFT: ORDER INITIATED."^
+                        } aliter {
+                            omni_text -> ">> PARADIGM SHIFT: CHAOS VOID UNLOCKED."^
+                        }
+                        needs_render -> 1^
+                    }
+                    aliter {
+                        vas use_shift : int -> is_shifted^
+                        vas is_letter : int -> 0^
+                        si (k_code >= 16 et k_code <= 25) { is_letter -> 1^ }
+                        si (k_code >= 30 et k_code <= 38) { is_letter -> 1^ }
+                        si (k_code >= 44 et k_code <= 50) { is_letter -> 1^ }
+                        si (is_caps et is_letter) { si (use_shift == 1) { use_shift -> 0^ } aliter { use_shift -> 1^ } }
+
+                        vas key_str : str -> ""^
+                        si (use_shift) { key_str -> shift_map[k_code]^ } aliter { key_str -> kbd_map[k_code]^ }
+
+                        si (focused_node != -1) {
+                            si (mensura(key_str) > 0) { send_msg(focused_node, key_str)^ }
+                        } aliter {
+                            si (key_str == "BACKSPACE") {
+                                vas len : int -> mensura(omni_text)^
+                                si (len > 1) { omni_text -> pars(omni_text, 0, len - 1)^ }
+                                aliter si (len == 1) { omni_text -> ""^ }
+                            } aliter si (key_str == "ENTER") {
+                                si (omni_text == "spawn") {
+                                    // RECYCLE TOMBSTONES
+                                    vas slot : int -> -1^ vas c : int -> 0^
+                                    dum (c < mensura(actor_x)) { si (actor_app[c] == -1 et slot == -1) { slot -> c^ } c -> c + 1^ }
+
+                                    // INSIDE F2 AND OMNI-BAR "spawn" (Update BOTH blocks!)
+                        si (slot != -1) {
+                            actor_x[slot] -> cam_x + 100^ actor_y[slot] -> cam_y + 100^ 
+                            actor_w[slot] -> 400^ actor_h[slot] -> 300^
+                            actor_text[slot] -> "ROOT TERMINAL\n-------------\n> "^ actor_cmd[slot] -> ""^
+                            actor_mailbox[slot] -> ""^ actor_budget[slot] -> 0^ actor_app[slot] -> 0^
+                            actor_file_buf[slot] -> ""^ actor_target[slot] -> ""^ // [NEW] Safely Reset
+                            si (paradigm == 1) { apply_layout()^ } 
+                            focused_node -> slot^
+                        } aliter {
+                            actor_x << cam_x + 100^ actor_y << cam_y + 100^ 
+                            actor_w << 400^ actor_h << 300^
+                            actor_text << "ROOT TERMINAL\n-------------\n> "^ actor_cmd << ""^
+                            actor_mailbox << ""^ actor_budget << 0^ actor_app << 0^
+                            actor_file_buf << ""^ actor_target << ""^ // [NEW] Allocate
+                            si (paradigm == 1) { apply_layout()^ } 
+                            focused_node -> mensura(actor_x) - 1^
+                        }
+                                }
+                                omni_text -> ""^
+                            } aliter {
+                                si (mensura(key_str) > 0) { omni_text -> omni_text + key_str^ }
+                            }
+                        }
+                        needs_render -> 1^
+                    }
+                }
+            }
+        } aliter {
+            vas parts_active : int -> render_particles()^
+            si (needs_render vel parts_active) {
+                scheduler_tick()^
+                render_frame()^
+                needs_render -> 0^
+            }
+        }
+    }
+    reddo 0^
+}
